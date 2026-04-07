@@ -25,6 +25,7 @@ def make_task(**overrides) -> TaskMetadata:
         "quality_threshold": 0.7,
         "estimated_task_value_usd": None,
         "project_id": generate_uuid_v7(),
+        "idempotency_key": generate_uuid_v7(),
         "is_operating_phase": False,
         "is_council_tier1_preassessment": False,
     }

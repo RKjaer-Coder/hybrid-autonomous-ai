@@ -54,7 +54,8 @@ class M3Harness:
         for s in failure_scenarios:
             backend.inject_failure(s)
             r = backend.execute_task(s)
-            successes += 1 if r.get("recovered") else 0
+            expected = bool(s.get("force_failure", {}).get("expected_recovery_success", False))
+            successes += 1 if bool(r.get("recovered")) == expected else 0
         return {"recovery_successes": successes}
 
     def evaluate_validation_rates(self, backend, outputs) -> dict:
@@ -69,7 +70,10 @@ class M3Harness:
                 exp_fail += 1
                 if v["verdict"] == "PASS":
                     fn += 1
-        return {"fp_rate": round(fp / exp_pass, 4), "fn_rate": round(fn / exp_fail, 4)}
+        # Defensive denominator guards prevent fixture-mix regressions from crashing runs.
+        fp_rate = round(fp / exp_pass, 4) if exp_pass else 0.0
+        fn_rate = round(fn / exp_fail, 4) if exp_fail else 0.0
+        return {"fp_rate": fp_rate, "fn_rate": fn_rate}
 
     def evaluate_telemetry_integrity(self, backend, completed_tasks) -> dict:
         expected = logged = 0
@@ -77,7 +81,8 @@ class M3Harness:
             exp = c["scenario"]["expected_chain_length"]
             events = backend.get_step_outcomes(c["chain_id"])
             expected += exp
-            logged += len(events)
+            valid = [e for e in events if e.get("outcome") in {"PASS", "FAIL", "DEGRADED"}]
+            logged += len(valid)
         coverage = (logged / expected) if expected else 0.0
         return {"coverage": round(coverage, 4), "integrity": expected == logged}
 

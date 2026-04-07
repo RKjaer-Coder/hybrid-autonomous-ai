@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import datetime
+import logging
+import os
+import sqlite3
+import tempfile
 from typing import Optional
 
 from .types import (
@@ -17,6 +21,143 @@ from .types import (
 
 _DEFAULT_ESTIMATED_TOKENS = 2000
 _ROI_EPSILON = 1e-12
+_RESERVATION_TTL_SECONDS = 3600
+LOGGER = logging.getLogger(__name__)
+
+
+def _as_utc(ts: datetime.datetime) -> datetime.datetime:
+    """Normalize datetime values to timezone-aware UTC."""
+    if ts.tzinfo is None:
+        # Defensive assumption: naive timestamps are interpreted as UTC.
+        return ts.replace(tzinfo=datetime.timezone.utc)
+    return ts.astimezone(datetime.timezone.utc)
+
+
+class SpendReservationRegistry:
+    """
+    In-memory atomic reservation registry for paid-route idempotency/concurrency safety.
+    Callers may supply a stronger shared/distributed implementation with the same method.
+    """
+
+    def reserve(self, session_id: str, request_id: str, current_spend: float, cap: float, amount: float) -> bool:
+        raise NotImplementedError
+
+    def commit(self, session_id: str, request_id: str) -> None:
+        raise NotImplementedError
+
+    def release(self, session_id: str, request_id: str) -> None:
+        raise NotImplementedError
+
+
+class SqliteSpendReservationRegistry(SpendReservationRegistry):
+    """Durable, cross-process reservation + idempotency registry."""
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0, isolation_level=None)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spend_reservations (
+                  request_id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  amount_usd REAL NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('reserved','committed','released')),
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  closed_at TEXT
+                ) STRICT
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_spend_reservations_session ON spend_reservations(session_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_spend_reservations_expiry ON spend_reservations(expires_at)")
+            cols = {row[1] for row in conn.execute("PRAGMA table_info('spend_reservations')").fetchall()}
+            if "status" not in cols:
+                conn.execute("ALTER TABLE spend_reservations ADD COLUMN status TEXT DEFAULT 'reserved'")
+                conn.execute("UPDATE spend_reservations SET status='reserved' WHERE status IS NULL")
+            if "closed_at" not in cols:
+                conn.execute("ALTER TABLE spend_reservations ADD COLUMN closed_at TEXT")
+
+    def reserve(self, session_id: str, request_id: str, current_spend: float, cap: float, amount: float) -> bool:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        expires = now + datetime.timedelta(seconds=_RESERVATION_TTL_SECONDS)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # TTL cleanup prevents unbounded growth and stale cap pressure.
+            conn.execute("DELETE FROM spend_reservations WHERE expires_at <= ?", (now.isoformat(),))
+
+            existing = conn.execute(
+                "SELECT session_id, amount_usd FROM spend_reservations WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if existing:
+                existing_session, existing_amount = existing
+                conn.execute("COMMIT")
+                return existing_session == session_id and abs(float(existing_amount) - float(amount)) < 1e-9
+
+            reserved_total = conn.execute(
+                "SELECT COALESCE(SUM(amount_usd), 0.0) FROM spend_reservations WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            if current_spend + float(reserved_total) + amount >= cap:
+                conn.execute("COMMIT")
+                return False
+
+            conn.execute(
+                """
+                INSERT INTO spend_reservations(request_id, session_id, amount_usd, status, created_at, expires_at)
+                VALUES (?, ?, ?, 'reserved', ?, ?)
+                """,
+                (request_id, session_id, amount, now.isoformat(), expires.isoformat()),
+            )
+            conn.execute("COMMIT")
+            return True
+
+    def commit(self, session_id: str, request_id: str) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE spend_reservations SET status='committed', closed_at=? WHERE request_id=? AND session_id=?",
+                (now, request_id, session_id),
+            )
+
+    def release(self, session_id: str, request_id: str) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE spend_reservations SET status='released', closed_at=? WHERE request_id=? AND session_id=?",
+                (now, request_id, session_id),
+            )
+
+
+def _build_default_registry() -> SpendReservationRegistry:
+    configured = os.getenv("HERMES_RESERVATION_DB_PATH")
+    db_path = configured or f"{tempfile.gettempdir()}/hybrid_router_reservations_v2.db"
+    try:
+        return SqliteSpendReservationRegistry(db_path)
+    except Exception:  # noqa: BLE001
+        fallback = "./router_reservations_fallback.db"
+        LOGGER.exception("reservation_store_init_failed", extra={"db_path": db_path, "fallback": fallback})
+        return SqliteSpendReservationRegistry(fallback)
+
+
+_DEFAULT_RESERVATIONS = _build_default_registry()
+
+
+def commit_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> None:
+    (registry or _DEFAULT_RESERVATIONS).commit(session_id, request_id)
+
+
+def release_paid_reservation(session_id: str, request_id: str, registry: Optional[SpendReservationRegistry] = None) -> None:
+    (registry or _DEFAULT_RESERVATIONS).release(session_id, request_id)
 
 
 def _filter_commercial(models: list[ModelInfo]) -> tuple[list[ModelInfo], dict[str, str]]:
@@ -89,7 +230,10 @@ def _check_g3_timeout(budget: BudgetState, current_time: datetime.datetime) -> b
     """Returns True if G3 has timed out (>=6h since request)."""
     if budget.g3_status != G3Status.PENDING or budget.g3_requested_at is None:
         return False
-    return (current_time - budget.g3_requested_at) >= datetime.timedelta(hours=budget.g3_timeout_hours)
+    timeout_hours = max(0.0, budget.g3_timeout_hours)
+    now = _as_utc(current_time)
+    requested_at = _as_utc(budget.g3_requested_at)
+    return (now - requested_at) >= datetime.timedelta(hours=timeout_hours)
 
 
 def _build_justification(selected_tier: RoutingTier, skipped: dict[str, str]) -> str:
@@ -107,30 +251,42 @@ def route_task(
     budget: BudgetState,
     jwt: JWTClaims,
     current_time: Optional[datetime.datetime] = None,
+    request_id: Optional[str] = None,
+    reservation_registry: Optional[SpendReservationRegistry] = None,
 ) -> RoutingDecision:
     """Pure decision logic for financial routing waterfall."""
-    now = current_time or datetime.datetime.now(datetime.timezone.utc)
+    now = _as_utc(current_time) if current_time else datetime.datetime.now(datetime.timezone.utc)
     skipped: dict[str, str] = {}
+
+    effective_quality_threshold = task.quality_threshold
+    if task.quality_threshold < 0:
+        skipped["validation"] = "quality threshold below 0 normalized to 0."
+        effective_quality_threshold = 0.0
 
     models = sorted(available_models, key=lambda m: (m.tier, m.model_id))
     permitted_models, commercial_skips = _filter_commercial(models)
     skipped.update(commercial_skips)
 
+    if jwt.max_api_spend_usd < 0 or jwt.current_session_spend_usd < 0:
+        skipped["jwt"] = "invalid negative spend claims; paid routing disabled."
+    jwt_spend_valid = jwt.max_api_spend_usd >= 0 and jwt.current_session_spend_usd >= 0 and jwt.current_session_spend_usd <= jwt.max_api_spend_usd
+    effective_request_id = request_id or task.idempotency_key
+
     g3_expired = _check_g3_timeout(budget, now)
     if g3_expired:
         skipped["paid_cloud"] = "G3 request expired (timeout reached), paid routing skipped and fallback applied."
 
-    local_model, local_reason = _best_model_for_tier(permitted_models, "local", task.quality_threshold)
+    local_model, local_reason = _best_model_for_tier(permitted_models, "local", effective_quality_threshold)
     if local_model is not None:
         return RoutingDecision(RoutingTier.LOCAL, local_model.model_id, G3Path.NOT_APPLICABLE, 0.0, False, _build_justification(RoutingTier.LOCAL, skipped), skipped, False, False)
     skipped["local"] = local_reason
 
-    free_model, free_reason = _best_model_for_tier(permitted_models, "free_cloud", task.quality_threshold, check_quota=True)
+    free_model, free_reason = _best_model_for_tier(permitted_models, "free_cloud", effective_quality_threshold, check_quota=True)
     if free_model is not None:
         return RoutingDecision(RoutingTier.FREE_CLOUD, free_model.model_id, G3Path.NOT_APPLICABLE, 0.0, False, _build_justification(RoutingTier.FREE_CLOUD, skipped), skipped, False, False)
     skipped["free_cloud"] = free_reason
 
-    sub_model, sub_reason = _best_model_for_tier(permitted_models, "subscription", task.quality_threshold, check_rate_limit=True)
+    sub_model, sub_reason = _best_model_for_tier(permitted_models, "subscription", effective_quality_threshold, check_rate_limit=True)
     if sub_model is not None:
         return RoutingDecision(RoutingTier.SUBSCRIPTION, sub_model.model_id, G3Path.NOT_APPLICABLE, 0.0, False, _build_justification(RoutingTier.SUBSCRIPTION, skipped), skipped, False, False)
     skipped["subscription"] = sub_reason
@@ -144,12 +300,17 @@ def route_task(
             paid_candidates = [m for m in permitted_models if m.tier == "paid"]
             if not paid_candidates:
                 skipped["paid_cloud"] = "no paid model available"
+            elif not effective_request_id:
+                skipped["paid_cloud"] = "missing idempotency key for paid routing"
             else:
                 qualified_paid: list[tuple[ModelInfo, float, G3Path, bool]] = []
                 paid_fail_reasons: list[str] = []
                 for model in sorted(paid_candidates, key=lambda m: (m.model_id,)):
-                    if model.quality_score < task.quality_threshold:
-                        paid_fail_reasons.append(f"{model.model_id} quality {model.quality_score:.4f} below threshold {task.quality_threshold:.4f}")
+                    if model.quality_score < effective_quality_threshold:
+                        paid_fail_reasons.append(f"{model.model_id} quality {model.quality_score:.4f} below threshold {effective_quality_threshold:.4f}")
+                        continue
+                    if not jwt_spend_valid:
+                        paid_fail_reasons.append(f"{model.model_id} blocked: invalid JWT spend claims")
                         continue
                     estimated_cost = model.cost_per_1k_tokens * _DEFAULT_ESTIMATED_TOKENS / 1000.0
                     if jwt.current_session_spend_usd + estimated_cost >= jwt.max_api_spend_usd:
@@ -173,10 +334,29 @@ def route_task(
                     qualified_paid.append((model, estimated_cost, g3_path, requires_approval))
 
                 if qualified_paid:
-                    selected_model, estimated_cost, g3_path, requires_approval = sorted(
+                    for selected_model, estimated_cost, g3_path, requires_approval in sorted(
                         qualified_paid, key=lambda entry: (-entry[0].quality_score, entry[0].model_id)
-                    )[0]
-                    return RoutingDecision(RoutingTier.PAID_CLOUD, selected_model.model_id, g3_path, estimated_cost, False, _build_justification(RoutingTier.PAID_CLOUD, skipped), skipped, requires_approval, False)
+                    ):
+                        if reservation_registry is not None:
+                            reserved = reservation_registry.reserve(
+                                session_id=jwt.session_id,
+                                request_id=effective_request_id,
+                                current_spend=jwt.current_session_spend_usd,
+                                cap=jwt.max_api_spend_usd,
+                                amount=estimated_cost,
+                            )
+                        else:
+                            reserved = _DEFAULT_RESERVATIONS.reserve(
+                                session_id=jwt.session_id,
+                                request_id=effective_request_id,
+                                current_spend=jwt.current_session_spend_usd,
+                                cap=jwt.max_api_spend_usd,
+                                amount=estimated_cost,
+                            )
+                        if reserved:
+                            return RoutingDecision(RoutingTier.PAID_CLOUD, selected_model.model_id, g3_path, estimated_cost, False, _build_justification(RoutingTier.PAID_CLOUD, skipped), skipped, requires_approval, False, effective_request_id)
+                        LOGGER.warning("paid_reservation_rejected", extra={"session_id": jwt.session_id, "request_id": effective_request_id})
+                        paid_fail_reasons.append(f"{selected_model.model_id} blocked: atomic reservation rejected (cap race)")
                 skipped["paid_cloud"] = "; ".join(paid_fail_reasons)
 
     sub_fallback_models = [

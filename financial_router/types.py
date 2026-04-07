@@ -51,6 +51,7 @@ class TaskMetadata:
     quality_threshold: float
     estimated_task_value_usd: Optional[float] = None
     project_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     is_operating_phase: bool = False
     is_council_tier1_preassessment: bool = False
 
@@ -104,3 +105,4 @@ class RoutingDecision:
     skipped_reasons: dict
     requires_operator_approval: bool
     compute_starved: bool
+    reservation_id: Optional[str] = None
