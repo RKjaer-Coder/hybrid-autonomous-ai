@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib
 import json
+import logging
+import multiprocessing as mp
 import signal
 import sys
 import time
+import uuid
 from abc import ABC, abstractmethod
 
 import pathlib
@@ -16,13 +20,29 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 
-from eval.fixtures.common import DeterministicFactory, weighted_sum
+from eval.fixtures.common import weighted_sum
 from eval.harnesses.harness_kill import KillHarness
 from eval.harnesses.harness_m1 import M1Harness
 from eval.harnesses.harness_m2 import M2Harness
 from eval.harnesses.harness_m3 import M3Harness
 from eval.harnesses.harness_m5 import M5Harness
 from eval.report import format_report
+
+ALLOWED_MILESTONES = ("M1", "M2", "M3", "M5", "KILL")
+LOGGER = logging.getLogger(__name__)
+
+
+class MetricsSink:
+    """Minimal metrics hook interface for operability integrations."""
+
+    def incr(self, name: str, value: int = 1, tags: dict | None = None) -> None:  # noqa: ARG002
+        return None
+
+    def observe(self, name: str, value: float, tags: dict | None = None) -> None:  # noqa: ARG002
+        return None
+
+
+METRICS = MetricsSink()
 
 
 class EvalBackend(ABC):
@@ -90,8 +110,30 @@ class MockBackend(EvalBackend):
             results = [{"roundtrip_id": i} for i in query["expected_match_ids"]]
             return {"results": results, "latency_ms": 120}
         q = query.get("query", "")
-        results = [v for k, v in self.memory.items() if q in {k, v.get("node_id"), v.get("brief_id")} or q in str(v)]
-        return {"results": results[:1] if results else [{"roundtrip_id": q}] if q else [], "latency_ms": 90}
+        if not q:
+            return {"results": [], "latency_ms": 90}
+
+        # Prefer exact identity lookups first for deterministic roundtrip tests.
+        direct = self.memory.get(q)
+        if direct is not None:
+            return {"results": [direct], "latency_ms": 90}
+
+        # Support semantic-style roundtrip query strings used in fixtures.
+        normalized = q.lower()
+        title_hint = q.split("about ", 1)[1].strip() if "about " in normalized else ""
+
+        matches = []
+        for key, value in self.memory.items():
+            node_id = value.get("node_id")
+            brief_id = value.get("brief_id")
+            title = str(value.get("title", ""))
+            if q in {key, node_id, brief_id}:
+                matches.append(value)
+                continue
+            if title_hint and title_hint == title:
+                matches.append(value)
+                continue
+        return {"results": matches[:1], "latency_ms": 90}
 
     def memory_force_kill(self) -> None:
         return None
@@ -106,6 +148,8 @@ class MockBackend(EvalBackend):
         if self.failure_cfg and self.failure_cfg["scenario_id"] == scenario["scenario_id"]:
             fails = self.failure_cfg["force_failure"]["failure_count"]
             steps.extend({"outcome": "FAIL"} for _ in range(fails))
+            # Key fix: recovery should reflect scenario contract, not a hardcoded True.
+            recovered = bool(self.failure_cfg["force_failure"].get("expected_recovery_success", False))
         self.step_outcomes[chain_id] = steps
         return {"steps": steps, "output": {"ok": True}, "latency_ms": 30_000, "telemetry": steps, "chain_id": chain_id, "recovered": recovered}
 
@@ -143,21 +187,97 @@ def _load_backend(path: str) -> EvalBackend:
         return MockBackend()
     module = importlib.import_module(path)
     backend_cls = getattr(module, "Backend")
-    return backend_cls()
+    backend = backend_cls()
+    if not isinstance(backend, EvalBackend):
+        raise TypeError(f"{path}.Backend must implement EvalBackend")
+    return backend
 
 
-def run_all(backend: EvalBackend, milestones: list[str], on_milestone_complete=None) -> dict:
-    rf = DeterministicFactory(99)
+def _normalize_milestones(milestones: list[str]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for m in milestones:
+        if m not in ALLOWED_MILESTONES:
+            raise ValueError(f"Unknown milestone: {m}")
+        if m not in seen:
+            normalized.append(m)
+            seen.add(m)
+    return normalized
+
+
+def _run_with_timeout(fn, timeout_s: float | None):
+    """Execute fn without timeout (kept for non-isolated fallback path)."""
+    if not timeout_s:
+        return fn()
+    # Portable note: true preemptive timeout is provided via subprocess isolation path.
+    return fn()
+
+
+def _run_milestone_worker(backend_path: str, milestone: str, output_queue: mp.Queue) -> None:
+    try:
+        backend = _load_backend(backend_path)
+        harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
+        result = harnesses[milestone].run(backend)
+        output_queue.put(("ok", result))
+    except Exception as exc:  # noqa: BLE001
+        output_queue.put(("error", {"status": "FAIL", "error_type": exc.__class__.__name__, "error_message": str(exc), "details": []}))
+
+
+def run_all(
+    backend: EvalBackend,
+    milestones: list[str],
+    on_milestone_complete=None,
+    per_milestone_timeout_s: float | None = None,
+    backend_path: str | None = None,
+) -> dict:
+    milestones = _normalize_milestones(milestones)
     harnesses = {"M1": M1Harness(), "M2": M2Harness(), "M3": M3Harness(), "M5": M5Harness(), "KILL": KillHarness()}
     results = {}
     for m in milestones:
-        results[m] = harnesses[m].run(backend)
+        started = time.monotonic()
+        try:
+            if per_milestone_timeout_s and backend_path:
+                # Portable preemptive timeout via process isolation (works across OS/thread models).
+                q: mp.Queue = mp.Queue()
+                proc = mp.Process(target=_run_milestone_worker, args=(backend_path, m, q), daemon=True)
+                proc.start()
+                proc.join(timeout=per_milestone_timeout_s)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(1.0)
+                    raise TimeoutError(f"operation exceeded {per_milestone_timeout_s:.2f}s")
+                if q.empty():
+                    raise RuntimeError("milestone process exited without result")
+                status, payload = q.get()
+                result = payload if status == "ok" else payload
+            elif per_milestone_timeout_s and not backend_path:
+                raise RuntimeError("per-milestone timeout requires backend_path for isolated execution")
+            else:
+                result = _run_with_timeout(lambda: harnesses[m].run(backend), per_milestone_timeout_s)
+        except TimeoutError as exc:
+            elapsed = time.monotonic() - started
+            LOGGER.error("milestone_timeout", extra={"milestone": m, "elapsed_seconds": round(elapsed, 3)})
+            METRICS.incr("milestone_timeout_total", tags={"milestone": m})
+            result = {
+                "status": "FAIL",
+                "error_type": "MilestoneTimeout",
+                "error_message": str(exc),
+                "elapsed_seconds": round(elapsed, 3),
+                "details": [],
+            }
+        except Exception as exc:  # noqa: BLE001
+            # Key fix: emit typed failure metadata instead of crashing caller pipelines.
+            LOGGER.exception("milestone_failure", extra={"milestone": m})
+            METRICS.incr("milestone_failure_total", tags={"milestone": m, "error_type": exc.__class__.__name__})
+            result = {"status": "FAIL", "error_type": exc.__class__.__name__, "error_message": str(exc), "details": []}
+        METRICS.observe("milestone_latency_seconds", time.monotonic() - started, tags={"milestone": m, "status": result.get("status", "UNKNOWN")})
+        results[m] = result
         if on_milestone_complete:
             on_milestone_complete(m, results[m])
     passed = sum(1 for v in results.values() if v["status"] == "PASS")
     return {
-        "run_id": rf.uuid_v7(),
-        "timestamp": rf.now(),
+        "run_id": str(uuid.uuid4()),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat(),
         "backend": backend.__class__.__name__,
         "milestones": results,
         "summary": {
@@ -176,9 +296,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--per-milestone-timeout", type=int, default=0, help="Optional timeout per milestone in seconds")
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
 
-    milestones = ["M1", "M2", "M3", "M5", "KILL"] if args.milestone == "ALL" else [args.milestone]
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be > 0")
+    if args.per_milestone_timeout < 0:
+        raise SystemExit("--per-milestone-timeout must be >= 0")
+
+    milestones = list(ALLOWED_MILESTONES) if args.milestone == "ALL" else [args.milestone]
     backend = _load_backend(args.backend)
     partial: dict = {"milestones": {}, "summary": {"total_milestones": len(milestones), "passed": 0, "failed": 0}}
     run_started = time.monotonic()
@@ -206,10 +333,19 @@ def main(argv: list[str] | None = None) -> int:
         partial["summary"]["failed"] = len(partial["milestones"]) - passed
 
     signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(args.timeout)
-    report = run_all(backend, milestones, on_milestone_complete=record_partial)
-    signal.alarm(0)
+    use_global_alarm = hasattr(signal, "SIGALRM") and args.per_milestone_timeout == 0
+    if use_global_alarm:
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(args.timeout)
+    report = run_all(
+        backend,
+        milestones,
+        on_milestone_complete=record_partial,
+        per_milestone_timeout_s=args.per_milestone_timeout or None,
+        backend_path=args.backend,
+    )
+    if use_global_alarm:
+        signal.alarm(0)
     partial.update(report)
     output = json.dumps(report, indent=2)
     if args.output:
@@ -219,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         print(output)
     if args.verbose:
         print(format_report(report))
-    return 0
+    return 0 if report["summary"]["overall_status"] == "PASS" else 1
 
 
 if __name__ == "__main__":

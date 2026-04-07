@@ -47,7 +47,10 @@ class M5Harness:
                 if v["recommendation"] == "REJECT":
                     fn += 1
             da_scores.append(v.get("da_quality_score", 0.0))
-        return {"fp_rate": round(fp / bad, 4), "fn_rate": round(fn / good, 4), "da_quality_mean": round(sum(da_scores) / len(da_scores), 4)}
+        fp_rate = round(fp / bad, 4) if bad else 0.0
+        fn_rate = round(fn / good, 4) if good else 0.0
+        da_mean = round(sum(da_scores) / len(da_scores), 4) if da_scores else 0.0
+        return {"fp_rate": fp_rate, "fn_rate": fn_rate, "da_quality_mean": da_mean}
 
     def evaluate_research_loops(self, backend, scenarios) -> dict:
         lat, briefs = [], []

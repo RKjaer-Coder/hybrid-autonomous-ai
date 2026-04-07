@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -71,18 +72,76 @@ EXPECTED_OBJECTS = {
 }
 
 
+def _schema_hash(schema_path: Path) -> str:
+    return hashlib.sha256(schema_path.read_bytes()).hexdigest()
+
+
+def _table_signature(conn: sqlite3.Connection, table_name: str) -> list[tuple]:
+    cols = conn.execute(f"PRAGMA table_xinfo('{table_name}')").fetchall()
+    # cid, name, type, notnull, dflt_value, pk, hidden
+    return [(c[1], c[2], c[3], c[5], c[6]) for c in cols]
+
+
+def _index_signature(conn: sqlite3.Connection, index_name: str) -> tuple[int, list[tuple]]:
+    info = conn.execute(f"PRAGMA index_xinfo('{index_name}')").fetchall()
+    # seqno, cid, name, desc, coll, key
+    key_cols = [(r[2], r[3], r[4], r[5]) for r in info if r[5] == 1]
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name = ?", (index_name,)).fetchone()
+    is_unique = 1 if row and row[0] and "unique index" in row[0].lower() else 0
+    return is_unique, key_cols
+
+
+def _semantic_schema_signatures(schema_path: Path) -> tuple[dict[str, list[tuple]], dict[str, tuple[int, list[tuple]]]]:
+    """
+    Build semantic table/index signatures by applying schema into an isolated in-memory DB.
+    This avoids brittle raw SQL text comparisons against sqlite_master canonicalization.
+    """
+    sql = schema_path.read_text(encoding="utf-8")
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.executescript(sql)
+        objects = conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        tables = {name for obj_type, name in objects if obj_type == "table"}
+        indexes = {name for obj_type, name in objects if obj_type == "index"}
+        table_sigs = {name: _table_signature(conn, name) for name in tables}
+        index_sigs = {name: _index_signature(conn, name) for name in indexes}
+    return table_sigs, index_sigs
+
+
 def apply_schema(db_path: Path, schema_path: Path) -> None:
     sql = schema_path.read_text(encoding="utf-8")
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.executescript(sql)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _schema_meta (
+              schema_name TEXT PRIMARY KEY,
+              schema_hash TEXT NOT NULL,
+              applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            ) STRICT
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO _schema_meta(schema_name, schema_hash, applied_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(schema_name) DO UPDATE SET
+              schema_hash=excluded.schema_hash,
+              applied_at=excluded.applied_at
+            """,
+            (schema_path.name, _schema_hash(schema_path)),
+        )
         conn.commit()
 
 
-def verify_database(db_path: Path, db_name: str) -> tuple[bool, list[str]]:
+def verify_database(db_path: Path, db_name: str, schema_path: Path) -> tuple[bool, list[str]]:
     expected = EXPECTED_OBJECTS[db_name]
     errors: list[str] = []
+    expected_table_sigs, expected_index_sigs = _semantic_schema_signatures(schema_path)
     with sqlite3.connect(db_path) as conn:
         mode = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
         if mode != "wal":
@@ -100,6 +159,26 @@ def verify_database(db_path: Path, db_name: str) -> tuple[bool, list[str]]:
             errors.append(f"missing tables: {', '.join(missing_tables)}")
         if missing_indexes:
             errors.append(f"missing indexes: {', '.join(missing_indexes)}")
+
+        # Semantic schema fidelity check (column/index signatures), robust to SQL formatting/canonicalization.
+        for table in sorted(expected["tables"] & expected_table_sigs.keys()):
+            actual_sig = _table_signature(conn, table)
+            if actual_sig != expected_table_sigs[table]:
+                errors.append(f"table drift detected for {table}")
+
+        for index in sorted(expected["indexes"] & expected_index_sigs.keys()):
+            actual_idx = _index_signature(conn, index)
+            if actual_idx != expected_index_sigs[index]:
+                errors.append(f"index drift detected for {index}")
+
+        meta = conn.execute(
+            "SELECT schema_hash FROM _schema_meta WHERE schema_name = ?",
+            (schema_path.name,),
+        ).fetchone()
+        if meta is None:
+            errors.append("missing _schema_meta entry for schema")
+        elif meta[0] != _schema_hash(schema_path):
+            errors.append("schema hash mismatch")
     return (len(errors) == 0, errors)
 
 
@@ -126,7 +205,7 @@ def main() -> int:
             continue
 
         if args.verify:
-            ok, errors = verify_database(db_path, db_name)
+            ok, errors = verify_database(db_path, db_name, schema_path)
             if ok:
                 print(f"[OK] verified {db_name}")
             else:

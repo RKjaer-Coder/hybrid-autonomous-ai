@@ -37,4 +37,6 @@ class KillHarness:
             else:
                 neg += 1
                 fp += 1 if r == "KILL" else 0
-        return {"kill_fp_rate": round(fp / neg, 4), "kill_fn_rate": round(fn / pos, 4)}
+        fp_rate = round(fp / neg, 4) if neg else 0.0
+        fn_rate = round(fn / pos, 4) if pos else 0.0
+        return {"kill_fp_rate": fp_rate, "kill_fn_rate": fn_rate}
