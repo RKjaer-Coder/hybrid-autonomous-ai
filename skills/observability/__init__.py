@@ -1,0 +1,1 @@
+"""Observability skill wrapper."""

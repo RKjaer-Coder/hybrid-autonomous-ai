@@ -1,0 +1,1 @@
+"""Opportunity pipeline skill wrapper."""

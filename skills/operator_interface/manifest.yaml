@@ -1,0 +1,9 @@
+name: operator_interface
+description: "operator_interface Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.operator_interface.skill.operator_interface_entry
+actions: []
+databases: []
+cron: null

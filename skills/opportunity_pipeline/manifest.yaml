@@ -1,0 +1,9 @@
+name: opportunity_pipeline
+description: "opportunity_pipeline Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.opportunity_pipeline.skill.opportunity_pipeline_entry
+actions: []
+databases: []
+cron: null

@@ -1,0 +1,9 @@
+name: council
+description: "council Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.council.skill.council_entry
+actions: []
+databases: []
+cron: null

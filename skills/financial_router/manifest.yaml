@@ -1,0 +1,9 @@
+name: financial_router
+description: "financial_router Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.financial_router.skill.financial_router_entry
+actions: []
+databases: []
+cron: null

@@ -1,0 +1,1 @@
+"""Strategic memory skill wrapper."""
