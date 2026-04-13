@@ -1,0 +1,9 @@
+name: immune_system
+description: "immune_system Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.immune_system.skill.immune_system_entry
+actions: []
+databases: []
+cron: null

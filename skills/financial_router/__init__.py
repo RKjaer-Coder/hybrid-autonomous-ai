@@ -1,0 +1,1 @@
+"""Financial router skill wrapper."""

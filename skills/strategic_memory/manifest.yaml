@@ -1,0 +1,9 @@
+name: strategic_memory
+description: "strategic_memory Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.strategic_memory.skill.strategic_memory_entry
+actions: []
+databases: []
+cron: null

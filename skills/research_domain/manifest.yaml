@@ -1,0 +1,9 @@
+name: research_domain
+description: "research_domain Hermes skill wrapper"
+version: "0.1.0"
+priority: normal
+stage: 0
+entry_point: skills.research_domain.skill.research_domain_entry
+actions: []
+databases: []
+cron: null
