@@ -85,7 +85,7 @@ class AppendBuffer:
             conn = self._get_connection()
             placeholders = ",".join(["?"] * len(self._config.columns))
             col_names = ",".join(self._config.columns)
-            sql = f"INSERT INTO {self._config.table_name} ({col_names}) VALUES ({placeholders})"
+            sql = f"INSERT OR IGNORE INTO {self._config.table_name} ({col_names}) VALUES ({placeholders})"
             conn.executemany(sql, rows)
             conn.commit()
             self._flush_count += 1

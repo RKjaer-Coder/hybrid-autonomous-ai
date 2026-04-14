@@ -75,3 +75,9 @@ def test_run_operator_workflow_proves_stage0_operator_path(tmp_path):
     assert result.readback is not None
     assert result.readback["title"] == "Stage 0 Proof"
     assert result.alert_id
+    assert result.digest_id
+    assert result.digest is not None
+    assert "Stage 0 Proof (INFORMATIONAL)" in result.digest["content"]
+    assert result.observability is not None
+    assert any(item["step_type"] == "digest" for item in result.observability.telemetry_events)
+    assert result.observability.system_health["heartbeat_state"] == "ACTIVE"

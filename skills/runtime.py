@@ -60,6 +60,18 @@ class RuntimeDoctorResult:
 
 
 @dataclass(frozen=True)
+class WorkflowObservabilitySnapshot:
+    """Queryable runtime evidence produced by the operator workflow proof."""
+
+    alert_history: list[dict[str, Any]]
+    digest_history: list[dict[str, Any]]
+    immune_verdicts: list[dict[str, Any]]
+    telemetry_events: list[dict[str, Any]]
+    reliability_dashboard: dict[str, Any]
+    system_health: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class OperatorWorkflowResult:
     """End-to-end Stage 0/1 operator workflow smoke test result."""
 
@@ -70,8 +82,135 @@ class OperatorWorkflowResult:
     brief_id: str | None
     readback: dict[str, Any] | None
     alert_id: str | None
+    digest_id: str | None
+    digest: dict[str, Any] | None
+    observability: WorkflowObservabilitySnapshot | None
     doctor: RuntimeDoctorResult
     error: str | None = None
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _ensure_operator_workflow_chain_definition(config: IntegrationConfig, chain_type: str = "operator_workflow") -> None:
+    db_manager = DatabaseManager(config.data_dir)
+    try:
+        conn = db_manager.get_connection("telemetry")
+        now = _utc_now()
+        steps = json.dumps(
+            [
+                {"step_type": "heartbeat", "skill": "operator_interface"},
+                {"step_type": "sheriff", "skill": "immune_system"},
+                {"step_type": "route", "skill": "financial_router"},
+                {"step_type": "write_brief", "skill": "strategic_memory"},
+                {"step_type": "read_brief", "skill": "strategic_memory"},
+                {"step_type": "judge", "skill": "immune_system"},
+                {"step_type": "alert", "skill": "operator_interface"},
+                {"step_type": "digest", "skill": "operator_interface"},
+            ]
+        )
+        conn.execute(
+            """
+            INSERT INTO chain_definitions (chain_type, steps, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chain_type) DO UPDATE SET
+                steps=excluded.steps,
+                updated_at=excluded.updated_at
+            """,
+            (chain_type, steps, now, now),
+        )
+        conn.commit()
+    finally:
+        db_manager.close_all()
+
+
+def _persist_step_outcome(
+    config: IntegrationConfig,
+    *,
+    chain_id: str,
+    step_type: str,
+    skill: str,
+    outcome: str,
+    latency_ms: float,
+    quality_warning: bool = False,
+    recovery_tier: int | None = None,
+) -> None:
+    db_manager = DatabaseManager(config.data_dir)
+    try:
+        conn = db_manager.get_connection("telemetry")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO step_outcomes (
+                event_id, step_type, skill, chain_id, outcome, latency_ms,
+                quality_warning, recovery_tier, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                generate_uuid_v7(),
+                step_type,
+                skill,
+                chain_id,
+                outcome,
+                int(latency_ms),
+                1 if quality_warning else 0,
+                recovery_tier,
+                _utc_now(),
+            ),
+        )
+        conn.commit()
+    finally:
+        db_manager.close_all()
+
+
+def _persist_immune_verdict(config: IntegrationConfig, verdict: Any, latency_ms: float) -> None:
+    db_manager = DatabaseManager(config.data_dir)
+    try:
+        conn = db_manager.get_connection("immune")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO immune_verdicts (
+                verdict_id, verdict_type, scan_tier, session_id, skill_name,
+                result, match_pattern, latency_ms, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verdict.verdict_id,
+                "sheriff_input" if verdict.check_type.value == "sheriff" else "judge_output",
+                verdict.tier.value,
+                verdict.session_id,
+                verdict.skill_name,
+                verdict.outcome.value,
+                verdict.block_reason.value if verdict.block_reason else None,
+                int(latency_ms),
+                _utc_now(),
+            ),
+        )
+        conn.commit()
+    finally:
+        db_manager.close_all()
+
+
+def _record_tool_step(
+    config: IntegrationConfig,
+    *,
+    chain_id: str,
+    step_type: str,
+    skill: str,
+    result: Any,
+    quality_warning: bool = False,
+) -> None:
+    _persist_step_outcome(
+        config,
+        chain_id=chain_id,
+        step_type=step_type,
+        skill=skill,
+        outcome="PASS" if result.success else "FAIL",
+        latency_ms=result.duration_ms,
+        quality_warning=quality_warning,
+    )
 
 
 def _normalize_runtime_layout(config: IntegrationConfig) -> IntegrationConfig:
@@ -374,6 +513,41 @@ def run_operator_workflow(
     )
     resolved = bootstrap.config
     session_id = bootstrap.session_context.session_id
+    chain_id = task_id
+    _ensure_operator_workflow_chain_definition(resolved)
+
+    heartbeat = tool_registry.invoke_tool(
+        "operator_interface",
+        {
+            "action": "record_heartbeat",
+            "interaction_type": "command",
+            "channel": "CLI",
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="heartbeat",
+        skill="operator_interface",
+        result=heartbeat,
+    )
+    if not heartbeat.success:
+        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
+        return OperatorWorkflowResult(
+            ok=False,
+            bootstrap=bootstrap,
+            sheriff_outcome="error",
+            routing_tier=None,
+            brief_id=None,
+            readback=None,
+            alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
+            doctor=doctor,
+            error=heartbeat.error,
+        )
+
     sheriff = tool_registry.invoke_tool(
         "immune_system",
         {
@@ -389,6 +563,13 @@ def run_operator_workflow(
             ),
         },
     )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="sheriff",
+        skill="immune_system",
+        result=sheriff,
+    )
     if not sheriff.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -399,10 +580,14 @@ def run_operator_workflow(
             brief_id=None,
             readback=None,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=sheriff.error,
         )
     sheriff_verdict = sheriff.output
+    _persist_immune_verdict(resolved, sheriff_verdict, sheriff.duration_ms)
     if sheriff_verdict.outcome == Outcome.BLOCK:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -413,6 +598,9 @@ def run_operator_workflow(
             brief_id=None,
             readback=None,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error="workflow blocked by sheriff",
         )
@@ -432,6 +620,15 @@ def run_operator_workflow(
             "jwt": JWTClaims(session_id=session_id),
         },
     )
+    route_quality_warning = bool(route.success and getattr(route.output, "quality_warning", False))
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="route",
+        skill="financial_router",
+        result=route,
+        quality_warning=route_quality_warning,
+    )
     if not route.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -442,6 +639,9 @@ def run_operator_workflow(
             brief_id=None,
             readback=None,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=route.error,
         )
@@ -457,6 +657,13 @@ def run_operator_workflow(
             "confidence": 0.8,
         },
     )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="write_brief",
+        skill="strategic_memory",
+        result=write_result,
+    )
     if not write_result.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -467,6 +674,9 @@ def run_operator_workflow(
             brief_id=None,
             readback=None,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=write_result.error,
         )
@@ -479,6 +689,13 @@ def run_operator_workflow(
             "brief_id": brief_id,
         },
     )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="read_brief",
+        skill="strategic_memory",
+        result=read_result,
+    )
     if not read_result.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -489,6 +706,9 @@ def run_operator_workflow(
             brief_id=brief_id,
             readback=None,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=read_result.error,
         )
@@ -505,6 +725,13 @@ def run_operator_workflow(
             ),
         },
     )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="judge",
+        skill="immune_system",
+        result=judge,
+    )
     if not judge.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -515,10 +742,14 @@ def run_operator_workflow(
             brief_id=brief_id,
             readback=read_result.output,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=judge.error,
         )
     judge_verdict = judge.output
+    _persist_immune_verdict(resolved, judge_verdict, judge.duration_ms)
     if judge_verdict.outcome == Outcome.BLOCK:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -529,6 +760,9 @@ def run_operator_workflow(
             brief_id=brief_id,
             readback=read_result.output,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error="workflow blocked by judge",
         )
@@ -542,6 +776,13 @@ def run_operator_workflow(
             "content": f"Workflow {task_id} stored brief {brief_id} via {routing_decision.tier.value}.",
         },
     )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="alert",
+        skill="operator_interface",
+        result=alert_result,
+    )
     if not alert_result.success:
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
@@ -552,10 +793,103 @@ def run_operator_workflow(
             brief_id=brief_id,
             readback=read_result.output,
             alert_id=None,
+            digest_id=None,
+            digest=None,
+            observability=None,
             doctor=doctor,
             error=alert_result.error,
         )
 
+    digest_result = tool_registry.invoke_tool(
+        "operator_interface",
+        {
+            "action": "generate_digest",
+            "digest_type": "daily",
+            "operator_state": "ACTIVE",
+        },
+    )
+    _record_tool_step(
+        resolved,
+        chain_id=chain_id,
+        step_type="digest",
+        skill="operator_interface",
+        result=digest_result,
+    )
+    if not digest_result.success:
+        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
+        return OperatorWorkflowResult(
+            ok=False,
+            bootstrap=bootstrap,
+            sheriff_outcome=sheriff_verdict.outcome.value,
+            routing_tier=routing_decision.tier.value,
+            brief_id=brief_id,
+            readback=read_result.output,
+            alert_id=alert_result.output,
+            digest_id=None,
+            digest=None,
+            observability=None,
+            doctor=doctor,
+            error=digest_result.error,
+        )
+
+    observability_alerts = tool_registry.invoke_tool(
+        "observability",
+        {"action": "query_alert_history", "limit": 5},
+    )
+    observability_digests = tool_registry.invoke_tool(
+        "observability",
+        {"action": "recent_digests", "limit": 3},
+    )
+    observability_immune = tool_registry.invoke_tool(
+        "observability",
+        {"action": "query_immune_verdicts", "limit": 5},
+    )
+    observability_telemetry = tool_registry.invoke_tool(
+        "observability",
+        {"action": "query_telemetry", "chain_id": chain_id, "limit": 20},
+    )
+    observability_reliability = tool_registry.invoke_tool(
+        "observability",
+        {"action": "reliability_dashboard", "limit": 10},
+    )
+    observability_health = tool_registry.invoke_tool(
+        "observability",
+        {"action": "system_health"},
+    )
+    observability_results = [
+        observability_alerts,
+        observability_digests,
+        observability_immune,
+        observability_telemetry,
+        observability_reliability,
+        observability_health,
+    ]
+    first_failure = next((item for item in observability_results if not item.success), None)
+    if first_failure is not None:
+        doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
+        return OperatorWorkflowResult(
+            ok=False,
+            bootstrap=bootstrap,
+            sheriff_outcome=sheriff_verdict.outcome.value,
+            routing_tier=routing_decision.tier.value,
+            brief_id=brief_id,
+            readback=read_result.output,
+            alert_id=alert_result.output,
+            digest_id=digest_result.output.get("digest_id"),
+            digest=digest_result.output,
+            observability=None,
+            doctor=doctor,
+            error=first_failure.error,
+        )
+
+    observability = WorkflowObservabilitySnapshot(
+        alert_history=observability_alerts.output,
+        digest_history=observability_digests.output,
+        immune_verdicts=observability_immune.output,
+        telemetry_events=observability_telemetry.output,
+        reliability_dashboard=observability_reliability.output,
+        system_health=observability_health.output,
+    )
     doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
     return OperatorWorkflowResult(
         ok=doctor.ok,
@@ -565,6 +899,9 @@ def run_operator_workflow(
         brief_id=brief_id,
         readback=read_result.output,
         alert_id=alert_result.output,
+        digest_id=digest_result.output["digest_id"],
+        digest=digest_result.output,
+        observability=observability,
         doctor=doctor,
         error=None if doctor.ok else "doctor reported missing runtime components",
     )

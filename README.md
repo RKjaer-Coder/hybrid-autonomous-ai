@@ -41,14 +41,16 @@ Implemented here today:
 - eval harnesses and deterministic fixtures for milestone verification
 - a Hermes runtime integration layer in `skills/runtime.py` that can prepare
   runtime directories, install a local profile bundle, migrate the databases,
-  create a Hermes session context, run a doctor check, and prove a narrow
-  operator workflow against a mock runtime
+  create a Hermes session context, run a doctor check, prove a narrow
+  operator workflow against a mock runtime, and verify the resulting
+  observability, alert, digest, and telemetry surfaces
 
 Not yet proven live in this repo:
 
 - confirmed wiring into a real Hermes startup/profile path
-- full production workflows for research, strategic memory, operator, and
-  observability layers
+- full live Hermes startup/profile attachment on a real installed runtime
+- broader production workflows beyond the current deterministic Stage 0/1
+  memory, operator, observability, and research slices
 - the richer target-state autonomy described in the broader architecture spec
 
 ## Repository Layout
@@ -151,14 +153,16 @@ Run the runtime doctor:
 python3 -m skills.runtime --doctor
 ```
 
-Prove the Stage 0/1 operator workflow:
+Prove the Stage 0/1 operator workflow plus observability-backed digest/alert checks:
 
 ```bash
 python3 -m skills.runtime --operator-workflow
 ```
 
 This workflow now installs the local profile bundle automatically before its
-final doctor check, so it succeeds from a clean runtime layout.
+final doctor check, records telemetry and immune verdict evidence into the
+SQLite baseline, generates a deterministic digest, and verifies the resulting
+observability queries from a clean runtime layout.
 
 Create and verify the five-database baseline directly:
 
@@ -198,6 +202,6 @@ The shortest accurate summary is:
 
 This repo is the implementation backbone for Hybrid Autonomous AI. It already
 contains a strong, test-backed substrate for persistence, routing, immune
-guardrails, evals, and Hermes bootstrap scaffolding, but it should still be
-described as pre-live integration rather than a fully deployed autonomous
-system.
+guardrails, evals, and Hermes bootstrap integration, but it should still be
+described as an implemented pre-live integration layer rather than a live
+Hermes deployment or a fully deployed autonomous system.
