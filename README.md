@@ -120,25 +120,30 @@ python3 -m skills.runtime --readiness
 ```
 
 That command prepares the repo-managed runtime bundle and canonical databases
-under the selected Hermes paths, checks the live Hermes CLI/version/profile/
-seed-tool surface, audits Hermes config/profile text for routing and
-dangerous-command expectations, runs a live Hermes CLI smoke test when Hermes
-is available, verifies `STEP_OUTCOME`/log evidence, creates a deterministic
-data snapshot under the runtime checkpoints directory, and exits clearly when
-Hermes is not installed.
+under the selected Hermes paths, generates a repo-owned Hermes profile under
+`~/.hermes/profiles/<profile>/` (`config.yaml` plus a spec-compat
+`profile.yaml` projection), validates that generated profile/config shape
+structurally, checks the live Hermes CLI/version/profile/seed-tool surface,
+runs a live Hermes CLI smoke test when Hermes is available, verifies
+`STEP_OUTCOME`/log evidence, creates a deterministic data snapshot under the
+runtime checkpoints directory, and exits clearly when Hermes is not installed.
 
 It also reports two current drifts explicitly instead of hiding them:
 
 - `spec/00_manifest.md` declares Hermes `v0.9.0+`, while `spec/s07_hermes_config.md`
   §7.5c still says `v0.8.0+`
-- `--install-profile` creates the repo-managed runtime bundle under
-  `~/.hermes/skills/.../runtime/`, but it does not yet generate the
-  Hermes-native `~/.hermes/profiles/<profile>/profile.yaml` that §7.5c D1-2
-  still expects
+- `spec/s07_hermes_config.md` §7.5c D1-2 still names
+  `~/.hermes/profiles/<profile>/profile.yaml`, while current Hermes docs/profile
+  commands center `config.yaml` inside the profile directory, so the repo now
+  emits both artifacts from one owned profile spec instead of pretending the
+  surfaces already match
 
-One remaining nuance is still called out by the command itself: the Hermes
-config assertions are heuristic text checks because the repo does not yet own a
-canonical Hermes-native `profile.yaml` generator/schema for §7.5c.
+One remaining uncertainty is still called out by the command itself: current
+Hermes public docs clearly describe `config.yaml` and `approvals.mode`, but
+they do not clearly document a first-class `dangerous_commands` config schema,
+so the repo continues to project and validate the §7.5c dangerous-command set
+as a repo-owned contract until live Hermes proves the exact upstream key
+shape.
 
 That runtime proof now exercises this chain from a clean layout:
 

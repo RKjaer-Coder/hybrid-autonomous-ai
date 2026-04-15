@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 from skills.config import IntegrationConfig
@@ -14,6 +15,7 @@ from skills.runtime import (
     doctor_runtime,
     install_runtime_profile,
     make_session_context,
+    main as runtime_main,
     migrate_runtime_databases,
     prepare_runtime_directories,
     run_operator_workflow,
@@ -32,6 +34,7 @@ def test_prepare_runtime_directories_creates_layout(tmp_path):
     assert Path(resolved.skills_dir).is_dir()
     assert Path(resolved.checkpoints_dir).is_dir()
     assert Path(resolved.alerts_dir).is_dir()
+    assert (tmp_path / "logs").is_dir()
 
 
 def test_migrate_runtime_databases_builds_all_sqlite_files(tmp_path):
@@ -101,10 +104,23 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     result = install_runtime_profile(cfg, repo_root=str(repo_root))
 
     manifest_path = Path(result.profile_manifest_path)
+    profile_config_path = Path(result.profile_config_path)
+    spec_profile_path = Path(result.spec_profile_path)
     assert manifest_path.is_file()
+    assert profile_config_path.is_file()
+    assert spec_profile_path.is_file()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    profile_config = json.loads(profile_config_path.read_text(encoding="utf-8"))
+    spec_profile = json.loads(spec_profile_path.read_text(encoding="utf-8"))
     assert manifest["profile_name"] == "hybrid-test"
     assert manifest["repo_root"] == str(repo_root.resolve())
+    assert manifest["profile_config_path"] == str(profile_config_path)
+    assert manifest["spec_profile_path"] == str(spec_profile_path)
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
+    assert profile_config["approvals"]["mode"] == "manual"
+    assert spec_profile["profile"] == "hybrid-test"
+    assert spec_profile["limits"]["max_api_spend_usd"] == 0.0
     assert "readiness" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
@@ -130,7 +146,27 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert not result.missing_items
     assert "immune_system" in result.registered_tools
     assert all(result.database_status.values())
+    assert result.profile_validation.ok is True
     assert result.path_status["readiness_launcher"] is True
+
+
+def test_doctor_runtime_detects_corrupted_profile_artifacts(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+        profile_name="hybrid-test",
+    )
+    install = install_runtime_profile(cfg)
+    migrate_runtime_databases(cfg)
+    Path(install.profile_config_path).write_text("not-json-yaml\n", encoding="utf-8")
+
+    result = doctor_runtime(config=cfg)
+
+    assert result.ok is False
+    assert result.profile_validation.ok is False
+    assert "profile:config_yaml_shape" in result.missing_items
 
 
 def test_assess_hermes_readiness_fails_clearly_without_hermes(tmp_path, monkeypatch):
@@ -141,9 +177,6 @@ def test_assess_hermes_readiness_fails_clearly_without_hermes(tmp_path, monkeypa
         alerts_dir=str(tmp_path / "alerts"),
         profile_name="hybrid-test",
     )
-    profile_dir = tmp_path / "profiles" / "hybrid-test"
-    profile_dir.mkdir(parents=True)
-    (profile_dir / "profile.yaml").write_text("profile: hybrid-test\n", encoding="utf-8")
     monkeypatch.setattr("skills.runtime.shutil.which", lambda _name: None)
 
     result = assess_hermes_readiness(config=cfg, repo_root=str(tmp_path))
@@ -151,8 +184,13 @@ def test_assess_hermes_readiness_fails_clearly_without_hermes(tmp_path, monkeypa
     assert result.ok is False
     assert result.hermes_installed is False
     assert result.doctor.ok is True
+    assert result.doctor.profile_validation.ok is True
+    assert result.profile_validation.ok is True
+    assert all(result.config_status.values())
     assert all(result.database_status.values())
     assert Path(result.checkpoint_backup_path).is_file()
+    assert Path(result.install.profile_config_path).is_file()
+    assert Path(result.install.spec_profile_path).is_file()
     assert any("not found in PATH" in item for item in result.blocking_items)
     assert VERSION_DRIFT_NOTE in result.drift_items
 
@@ -165,78 +203,47 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
         alerts_dir=str(tmp_path / "alerts"),
         profile_name="hybrid-test",
     )
-    profile_dir = tmp_path / "profiles" / "hybrid-test"
-    profile_dir.mkdir(parents=True)
-    (profile_dir / "profile.yaml").write_text(
-        "\n".join(
-            [
-                "profile: hybrid-test",
-                "routing:",
-                "  strong_model: anthropic/claude-opus-4",
-                "limits:",
-                "  max_api_spend_usd: 0.0",
-                "endpoint: http://localhost:11434",
-                "approvals:",
-                "  mode: manual",
-                "dangerous_commands:",
-                "  - rm -rf",
-                "  - chmod 777",
-                "  - sudo",
-                "  - mkfs",
-                "  - iptables",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
     (tmp_path / "logs").mkdir()
 
     monkeypatch.setattr("skills.runtime.shutil.which", lambda _name: "/usr/bin/hermes")
 
-    responses = {
-        ("hermes", "--version"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "--version"),
-            returncode=0,
-            stdout="Hermes Agent 0.9.1",
-            stderr="",
-        ),
-        ("hermes", "profile", "list"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "profile", "list"),
-            returncode=0,
-            stdout="default\nhybrid-test\n",
-            stderr="",
-        ),
-        ("hermes", "tools", "list"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "tools", "list"),
-            returncode=0,
-            stdout="\n".join(
-                [
-                    "code_execution",
-                    "file_operations",
-                    "web_search",
-                    "web_fetch",
-                    "shell_command",
-                ]
-            ),
-            stderr="",
-        ),
-        ("hermes", "--profile", "hybrid-test", "config"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "--profile", "hybrid-test", "config"),
-            returncode=0,
-            stdout=(tmp_path / "profiles" / "hybrid-test" / "profile.yaml").read_text(encoding="utf-8"),
-            stderr="",
-        ),
-    }
+    def runner(argv):
+        key = tuple(argv)
+        if key == ("hermes", "--version"):
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.9.1", "")
+        if key == ("hermes", "profile", "list"):
+            return ExternalCommandResult(True, key, 0, "default\nhybrid-test\n", "")
+        if key == ("hermes", "tools", "list"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                "\n".join(
+                    [
+                        "code_execution",
+                        "file_operations",
+                        "web_search",
+                        "web_fetch",
+                        "shell_command",
+                    ]
+                ),
+                "",
+            )
+        if key == ("hermes", "--profile", "hybrid-test", "config", "show"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
+                "",
+            )
+        raise AssertionError(f"unexpected command: {key}")
 
     result = assess_hermes_readiness(
         config=cfg,
         repo_root=str(tmp_path),
         run_cli_smoke=False,
-        command_runner=lambda argv: responses[tuple(argv)],
+        command_runner=runner,
     )
 
     assert result.ok is True
@@ -245,6 +252,8 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     assert result.profile_listed is True
     assert all(result.seed_tool_status.values())
     assert all(result.config_status.values())
+    assert result.doctor.profile_validation.ok is True
+    assert result.profile_validation.ok is True
     assert Path(result.checkpoint_backup_path).is_file()
     assert result.doctor.ok is True
     assert not result.blocking_items
@@ -258,64 +267,53 @@ def test_assess_hermes_readiness_rejects_0_8_x_even_if_checklist_allows_it(tmp_p
         alerts_dir=str(tmp_path / "alerts"),
         profile_name="hybrid-test",
     )
-    profile_dir = tmp_path / "profiles" / "hybrid-test"
-    profile_dir.mkdir(parents=True)
-    (profile_dir / "profile.yaml").write_text(
-        "profile: hybrid-test\nendpoint: http://localhost:11434\nstrong_model: local\nmax_api_spend_usd: 0.0\napprovals:\n  mode: manual\ndangerous_commands:\n  - rm -rf\n  - chmod 777\n  - sudo\n  - mkfs\n  - iptables\n",
-        encoding="utf-8",
-    )
     (tmp_path / "logs").mkdir()
 
     monkeypatch.setattr("skills.runtime.shutil.which", lambda _name: "/usr/bin/hermes")
 
-    responses = {
-        ("hermes", "--version"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "--version"),
-            returncode=0,
-            stdout="Hermes Agent 0.8.9",
-            stderr="",
-        ),
-        ("hermes", "profile", "list"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "profile", "list"),
-            returncode=0,
-            stdout="hybrid-test\n",
-            stderr="",
-        ),
-        ("hermes", "tools", "list"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "tools", "list"),
-            returncode=0,
-            stdout="\n".join(
-                [
-                    "code_execution",
-                    "file_operations",
-                    "web_search",
-                    "web_fetch",
-                    "shell_command",
-                ]
-            ),
-            stderr="",
-        ),
-        ("hermes", "--profile", "hybrid-test", "config"): ExternalCommandResult(
-            ok=True,
-            command=("hermes", "--profile", "hybrid-test", "config"),
-            returncode=0,
-            stdout=(tmp_path / "profiles" / "hybrid-test" / "profile.yaml").read_text(encoding="utf-8"),
-            stderr="",
-        ),
-    }
+    def runner(argv):
+        key = tuple(argv)
+        if key == ("hermes", "--version"):
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.8.9", "")
+        if key == ("hermes", "profile", "list"):
+            return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
+        if key == ("hermes", "tools", "list"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                "\n".join(
+                    [
+                        "code_execution",
+                        "file_operations",
+                        "web_search",
+                        "web_fetch",
+                        "shell_command",
+                    ]
+                ),
+                "",
+            )
+        if key == ("hermes", "--profile", "hybrid-test", "config", "show"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
+                "",
+            )
+        raise AssertionError(f"unexpected command: {key}")
 
     result = assess_hermes_readiness(
         config=cfg,
         repo_root=str(tmp_path),
         run_cli_smoke=False,
-        command_runner=lambda argv: responses[tuple(argv)],
+        command_runner=runner,
     )
 
     assert result.ok is False
     assert result.hermes_version == "0.8.9"
+    assert result.doctor.profile_validation.ok is True
+    assert result.profile_validation.ok is True
     assert any("below the manifest floor" in item for item in result.blocking_items)
     assert VERSION_DRIFT_NOTE in result.drift_items
 
@@ -328,23 +326,6 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
         alerts_dir=str(tmp_path / "alerts"),
         profile_name="hybrid-test",
     )
-    profile_dir = tmp_path / "profiles" / "hybrid-test"
-    profile_dir.mkdir(parents=True)
-    profile_text = (
-        "profile: hybrid-test\n"
-        "endpoint: http://localhost:11434\n"
-        "strong_model: anthropic/claude-opus-4\n"
-        "max_api_spend_usd: 0.0\n"
-        "approvals:\n"
-        "  mode: manual\n"
-        "dangerous_commands:\n"
-        "  - rm -rf\n"
-        "  - chmod 777\n"
-        "  - sudo\n"
-        "  - mkfs\n"
-        "  - iptables\n"
-    )
-    (profile_dir / "profile.yaml").write_text(profile_text, encoding="utf-8")
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
 
@@ -358,8 +339,14 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
             return ExternalCommandResult(True, key, 0, "code_execution\nfile_operations\nweb_search\nweb_fetch\nshell_command\n", "")
-        if key == ("hermes", "--profile", "hybrid-test", "config"):
-            return ExternalCommandResult(True, key, 0, profile_text, "")
+        if key == ("hermes", "--profile", "hybrid-test", "config", "show"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                (tmp_path / "profiles" / "hybrid-test" / "config.yaml").read_text(encoding="utf-8"),
+                "",
+            )
         if key[:4] == ("hermes", "--profile", "hybrid-test", "chat"):
             query = key[-1]
             marker = query.split("`echo ", 1)[1].split("`", 1)[0]
@@ -388,6 +375,7 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     assert result.ok is True
     assert result.cli_smoke_attempted is True
     assert result.cli_smoke_ok is True
+    assert result.doctor.profile_validation.ok is True
     assert result.cli_smoke_step_outcomes_delta == 1
     assert result.cli_smoke_log_trace is True
     assert result.cli_smoke_output == result.cli_smoke_marker
@@ -427,3 +415,31 @@ def test_run_operator_workflow_installs_profile_before_final_doctor(tmp_path):
     assert any(item["step_type"] == "phase_gate_apply" for item in result.observability.telemetry_events)
     assert result.observability.system_health["heartbeat_state"] == "ACTIVE"
     assert result.observability.system_health["pending_harvests"] == 1
+
+
+def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--bootstrap-live",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+            "--profile-name",
+            "hybrid-test",
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "bootstrap ok" in output
+    assert "session_id=" in output

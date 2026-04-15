@@ -48,16 +48,18 @@ VERSION_DRIFT_NOTE = (
     "spec/s07_hermes_config.md §7.5c still says v0.8.0+."
 )
 PROFILE_DRIFT_NOTE = (
-    "repo/spec drift: --install-profile creates the repo-managed runtime bundle "
-    "under ~/.hermes/skills/.../runtime/, but it does not generate the "
-    "Hermes-native ~/.hermes/profiles/<profile>/profile.yaml that §7.5c D1-2 "
-    "still expects."
+    "spec/doc drift: spec/s07_hermes_config.md §7.5c D1-2 still names "
+    "~/.hermes/profiles/<profile>/profile.yaml, while current Hermes docs and "
+    "profile commands center config.yaml inside the profile directory. The repo "
+    "now generates a docs-aligned config.yaml plus a spec-compat profile.yaml "
+    "projection so the mismatch stays explicit."
 )
-CHECKLIST_COVERAGE_NOTE = (
-    "coverage gap: readiness automates the repo-toolable Day 1–2 checks, but "
-    "it still relies on heuristic text matching for Hermes config schema "
-    "assertions because the repo does not yet own a canonical Hermes-native "
-    "profile.yaml generator."
+CONFIG_SURFACE_UNCERTAINTY_NOTE = (
+    "upstream uncertainty: current Hermes public docs clearly describe "
+    "config.yaml and approvals.mode, but they do not clearly document a "
+    "first-class dangerous_commands config schema. The repo still projects and "
+    "validates the §7.5c dangerous-command set as a repo-owned contract until "
+    "live Hermes proves the exact upstream key shape."
 )
 EXPECTED_DANGEROUS_COMMAND_FAMILIES: dict[str, tuple[str, ...]] = {
     "rm_rf": ("rm -rf", "rm\\s+(-[rrf]+\\s+)*[/~]"),
@@ -66,7 +68,10 @@ EXPECTED_DANGEROUS_COMMAND_FAMILIES: dict[str, tuple[str, ...]] = {
     "disk_ops": ("mkfs", "fdisk", "dd if=", "of=/dev"),
     "firewall_ops": ("iptables", "ufw", "firewall-cmd"),
 }
-CONFIG_LOCAL_TOKENS = tuple(sorted({*(str(port) for port in CONSTRUCTION_ALLOWLIST.permitted_ports), "localhost", "127.0.0.1", "::1"}))
+PROFILE_CONFIG_SKILL_KEY = "hybrid_autonomous_ai"
+DEFAULT_LOCAL_MODEL = "hybrid-autonomous-ai-local"
+DEFAULT_STRONG_MODEL = "hybrid-autonomous-ai-strong"
+DEFAULT_LOCAL_BASE_URL = f"http://127.0.0.1:{min(CONSTRUCTION_ALLOWLIST.permitted_ports)}/v1"
 
 
 @dataclass(frozen=True)
@@ -86,9 +91,24 @@ class RuntimeProfileInstallResult:
 
     config: IntegrationConfig
     repo_root: str
+    profile_dir: str
+    profile_config_path: str
+    spec_profile_path: str
     profile_manifest_path: str
     launcher_paths: dict[str, str]
     linked_skill_paths: list[str]
+
+
+@dataclass(frozen=True)
+class HermesProfileValidationResult:
+    """Structured validation result for the repo-owned Hermes profile artifacts."""
+
+    ok: bool
+    profile_dir: str
+    profile_config_path: str
+    spec_profile_path: str
+    checks: dict[str, bool]
+    issues: list[str]
 
 
 @dataclass(frozen=True)
@@ -102,6 +122,7 @@ class RuntimeDoctorResult:
     registered_tools: list[str]
     missing_items: list[str]
     profile_manifest_path: str
+    profile_validation: HermesProfileValidationResult
 
 
 @dataclass(frozen=True)
@@ -129,6 +150,7 @@ class HermesReadinessResult:
     live_tools: list[str]
     seed_tool_status: dict[str, bool]
     config_status: dict[str, bool]
+    profile_validation: HermesProfileValidationResult
     path_status: dict[str, bool]
     database_status: dict[str, bool]
     legacy_database_files: list[str]
@@ -495,6 +517,27 @@ def _runtime_profile_dir(config: IntegrationConfig) -> Path:
     return _runtime_root(config) / "profiles" / config.profile_name
 
 
+def _runtime_logs_dir(config: IntegrationConfig) -> Path:
+    return _runtime_root(config) / "logs"
+
+
+def _runtime_profile_config_path(config: IntegrationConfig) -> Path:
+    return _runtime_profile_dir(config) / "config.yaml"
+
+
+def _runtime_spec_profile_path(config: IntegrationConfig) -> Path:
+    return _runtime_profile_dir(config) / "profile.yaml"
+
+
+def _runtime_profile_validation_repo_root(config: IntegrationConfig) -> Path:
+    manifest = _read_json_yaml(_runtime_profile_manifest_path(config))
+    if manifest is not None:
+        repo_root = manifest.get("repo_root")
+        if isinstance(repo_root, str) and repo_root.strip():
+            return Path(repo_root).expanduser().resolve()
+    return _repo_root()
+
+
 def _run_external_command(argv: Sequence[str]) -> ExternalCommandResult:
     command = tuple(str(part) for part in argv)
     try:
@@ -566,29 +609,172 @@ def _run_command_candidates(
     return last_result
 
 
-def _config_contains_any(text: str, tokens: Sequence[str]) -> bool:
-    lower = text.lower()
-    return any(token.lower() in lower for token in tokens)
+def _representative_dangerous_commands() -> list[str]:
+    return [variants[0] for variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.values()]
 
 
-def _config_has_key_with_zero(text: str, key: str) -> bool:
-    return re.search(rf"{re.escape(key)}[^0-9-]*0(?:\.0+)?\b", text.lower()) is not None
-
-
-def _audit_config_texts(config_texts: Sequence[str]) -> dict[str, bool]:
-    merged = "\n".join(text for text in config_texts if text).lower()
-    dangerous_family_hits = {
-        family: _config_contains_any(merged, variants)
-        for family, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()
-    }
-    approvals_not_off = not re.search(r"approvals(?:\s*:\s*|\..*?mode[^a-z]*)off\b", merged)
+def _repo_owned_runtime_mapping(config: IntegrationConfig, repo_root: Path) -> dict[str, Any]:
     return {
-        "local_routing_endpoint": _config_contains_any(merged, CONFIG_LOCAL_TOKENS),
-        "strong_model_hint": _config_contains_any(merged, ("strong_model", "fallback_model", "priority_processing", "smart_model_routing")),
-        "max_api_spend_zero": _config_has_key_with_zero(merged, "max_api_spend_usd"),
-        "dangerous_command_patterns": all(dangerous_family_hits.values()),
-        "approvals_not_off": approvals_not_off,
+        "repo_root": str(repo_root),
+        "data_dir": config.data_dir,
+        "skills_dir": config.skills_dir,
+        "checkpoints_dir": config.checkpoints_dir,
+        "alerts_dir": config.alerts_dir,
+        "logs_dir": str(_runtime_logs_dir(config)),
     }
+
+
+def _repo_owned_skill_config(config: IntegrationConfig, repo_root: Path) -> dict[str, Any]:
+    return {
+        "profile_name": config.profile_name,
+        "repo_contract_version": 1,
+        "construction_phase": config.construction_phase,
+        "runtime": _repo_owned_runtime_mapping(config, repo_root),
+        "routing": {
+            "local_endpoint": DEFAULT_LOCAL_BASE_URL,
+            "local_model": DEFAULT_LOCAL_MODEL,
+            "fallback_endpoint": DEFAULT_LOCAL_BASE_URL,
+            "strong_model_strategy": "frontier-if-configured-else-local",
+            "max_api_spend_usd": config.max_api_spend_usd,
+        },
+        "dangerous_command_families": {name: list(variants) for name, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()},
+    }
+
+
+def _build_hermes_profile_documents(config: IntegrationConfig, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    runtime_mapping = _repo_owned_runtime_mapping(config, repo_root)
+    skill_config = _repo_owned_skill_config(config, repo_root)
+    dangerous_commands = _representative_dangerous_commands()
+    config_doc = {
+        "model": {
+            "provider": "custom",
+            "default": DEFAULT_LOCAL_MODEL,
+            "base_url": DEFAULT_LOCAL_BASE_URL,
+            "api_key": "local-construction",
+        },
+        "fallback_model": {
+            "provider": "main",
+            "model": DEFAULT_STRONG_MODEL,
+        },
+        "approvals": {
+            "mode": "manual",
+        },
+        "terminal": {
+            "backend": "local",
+        },
+        "checkpoints": {
+            "enabled": True,
+            "max_snapshots": 20,
+        },
+        "dangerous_commands": dangerous_commands,
+        "skills": {
+            "config": {
+                PROFILE_CONFIG_SKILL_KEY: skill_config,
+            }
+        },
+    }
+    spec_profile_doc = {
+        "profile": config.profile_name,
+        "routing": {
+            "local_model": {
+                "provider": "custom",
+                "default": DEFAULT_LOCAL_MODEL,
+                "base_url": DEFAULT_LOCAL_BASE_URL,
+            },
+            "strong_model": {
+                "strategy": "frontier-if-configured-else-local",
+                "fallback_model": {
+                    "provider": "main",
+                    "model": DEFAULT_STRONG_MODEL,
+                },
+            },
+        },
+        "limits": {
+            "max_api_spend_usd": config.max_api_spend_usd,
+        },
+        "approvals": {
+            "mode": "manual",
+        },
+        "dangerous_commands": dangerous_commands,
+        "runtime": runtime_mapping,
+    }
+    return config_doc, spec_profile_doc
+
+
+def _write_json_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
+
+
+def _read_json_yaml(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _nested_get(payload: dict[str, Any], *keys: str) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def _contains_subset(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(key in actual and _contains_subset(actual[key], value) for key, value in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return False
+        return all(any(_contains_subset(candidate, item) for candidate in actual) for item in expected)
+    return actual == expected
+
+
+def _validate_profile_artifacts(config: IntegrationConfig, repo_root: Path) -> HermesProfileValidationResult:
+    config_path = _runtime_profile_config_path(config)
+    spec_profile_path = _runtime_spec_profile_path(config)
+    expected_config_doc, expected_spec_profile_doc = _build_hermes_profile_documents(config, repo_root)
+    actual_config_doc = _read_json_yaml(config_path) if config_path.is_file() else None
+    actual_spec_profile_doc = _read_json_yaml(spec_profile_path) if spec_profile_path.is_file() else None
+
+    checks = {
+        "config_yaml_shape": actual_config_doc is not None and _contains_subset(actual_config_doc, expected_config_doc),
+        "spec_profile_yaml_shape": actual_spec_profile_doc is not None and _contains_subset(actual_spec_profile_doc, expected_spec_profile_doc),
+        "profile_name": _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name") == config.profile_name,
+        "local_model": _nested_get(actual_config_doc or {}, "model", "provider") == "custom"
+        and _nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
+        and _nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
+        "fallback_model": _nested_get(actual_config_doc or {}, "fallback_model", "provider") == "main"
+        and _nested_get(actual_config_doc or {}, "fallback_model", "model") == DEFAULT_STRONG_MODEL,
+        "max_api_spend_zero": _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "routing", "max_api_spend_usd")
+        == 0.0,
+        "approvals_manual": _nested_get(actual_config_doc or {}, "approvals", "mode") == "manual",
+        "dangerous_commands": _contains_subset(
+            _nested_get(actual_config_doc or {}, "dangerous_commands") or [],
+            _representative_dangerous_commands(),
+        ),
+        "runtime_paths": _contains_subset(
+            _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
+            _repo_owned_runtime_mapping(config, repo_root),
+        ),
+    }
+    issues = [name for name, ok in checks.items() if not ok]
+    return HermesProfileValidationResult(
+        ok=not issues,
+        profile_dir=str(_runtime_profile_dir(config)),
+        profile_config_path=str(config_path),
+        spec_profile_path=str(spec_profile_path),
+        checks=checks,
+        issues=issues,
+    )
 
 
 def _step_outcome_count(config: IntegrationConfig) -> int:
@@ -713,6 +899,7 @@ def prepare_runtime_directories(config: IntegrationConfig) -> IntegrationConfig:
         resolved.skills_dir,
         resolved.checkpoints_dir,
         resolved.alerts_dir,
+        str(_runtime_logs_dir(resolved)),
     ):
         Path(raw_path).mkdir(parents=True, exist_ok=True)
     return resolved
@@ -740,10 +927,14 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     manifest = {
         "profile_name": resolved.profile_name,
         "repo_root": str(root),
+        "profile_dir": str(_runtime_profile_dir(resolved)),
+        "profile_config_path": str(_runtime_profile_config_path(resolved)),
+        "spec_profile_path": str(_runtime_spec_profile_path(resolved)),
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
         "checkpoints_dir": resolved.checkpoints_dir,
         "alerts_dir": resolved.alerts_dir,
+        "logs_dir": str(_runtime_logs_dir(resolved)),
         "linked_skills": linked_skill_paths,
         "commands": {
             "bootstrap": _command_string(resolved, "--bootstrap-live", root),
@@ -755,6 +946,12 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     manifest_path = _runtime_profile_manifest_path(resolved)
     manifest_path.write_text(f"{json.dumps(manifest, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
+    profile_dir = _runtime_profile_dir(resolved)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    config_doc, spec_profile_doc = _build_hermes_profile_documents(resolved, root)
+    _write_json_yaml(_runtime_profile_config_path(resolved), config_doc)
+    _write_json_yaml(_runtime_spec_profile_path(resolved), spec_profile_doc)
+
     _write_launcher(launcher_paths["bootstrap"], resolved, root, "--bootstrap-live")
     _write_launcher(launcher_paths["doctor"], resolved, root, "--doctor")
     _write_launcher(launcher_paths["readiness"], resolved, root, "--readiness")
@@ -763,6 +960,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     return RuntimeProfileInstallResult(
         config=resolved,
         repo_root=str(root),
+        profile_dir=str(profile_dir),
+        profile_config_path=str(_runtime_profile_config_path(resolved)),
+        spec_profile_path=str(_runtime_spec_profile_path(resolved)),
         profile_manifest_path=str(manifest_path),
         launcher_paths={name: str(path) for name, path in launcher_paths.items()},
         linked_skill_paths=linked_skill_paths,
@@ -838,12 +1038,20 @@ def doctor_runtime(
         "skills_dir": Path(resolved.skills_dir).is_dir(),
         "checkpoints_dir": Path(resolved.checkpoints_dir).is_dir(),
         "alerts_dir": Path(resolved.alerts_dir).is_dir(),
+        "logs_dir": _runtime_logs_dir(resolved).is_dir(),
         "profile_manifest": _runtime_profile_manifest_path(resolved).is_file(),
+        "profile_dir": _runtime_profile_dir(resolved).is_dir(),
+        "profile_config": _runtime_profile_config_path(resolved).is_file(),
+        "spec_profile": _runtime_spec_profile_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
         "readiness_launcher": launcher_paths["readiness"].is_file(),
         "operator_workflow_launcher": launcher_paths["operator_workflow"].is_file(),
     }
+    profile_validation = _validate_profile_artifacts(
+        resolved,
+        _runtime_profile_validation_repo_root(resolved),
+    )
 
     database_status = {db_name: False for db_name in CANONICAL_DATABASES}
     if path_status["data_dir"]:
@@ -860,6 +1068,7 @@ def doctor_runtime(
         registered_tools = tool_registry.list_tools()
 
     missing_items = [name for name, ok in path_status.items() if not ok]
+    missing_items.extend(f"profile:{issue}" for issue in profile_validation.issues)
     missing_items.extend(f"db:{db_name}" for db_name, ok in database_status.items() if not ok)
     if tool_registry is not None:
         missing_items.extend(f"tool:{tool_name}" for tool_name in EXPECTED_CORE_TOOLS if tool_name not in registered_tools)
@@ -872,6 +1081,7 @@ def doctor_runtime(
         registered_tools=registered_tools,
         missing_items=missing_items,
         profile_manifest_path=str(_runtime_profile_manifest_path(resolved)),
+        profile_validation=profile_validation,
     )
 
 
@@ -888,14 +1098,17 @@ def assess_hermes_readiness(
     """Prepare repo-managed runtime artifacts and verify live Hermes readiness."""
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     install = install_runtime_profile(resolved, repo_root=repo_root)
+    repo_root_path = Path(install.repo_root)
     database_status = migrate_runtime_databases(resolved)
     registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
     doctor = doctor_runtime(registry, config=resolved)
     checkpoint_backup_path = _snapshot_runtime_data(resolved)
+    profile_validation = _validate_profile_artifacts(resolved, repo_root_path)
 
     profile_dir = _runtime_profile_dir(resolved)
-    profile_yaml = profile_dir / "profile.yaml"
-    logs_dir = _runtime_root(resolved) / "logs"
+    profile_config = _runtime_profile_config_path(resolved)
+    spec_profile = _runtime_spec_profile_path(resolved)
+    logs_dir = _runtime_logs_dir(resolved)
     path_status = {
         "data_dir": Path(resolved.data_dir).is_dir(),
         "skills_dir": Path(resolved.skills_dir).is_dir(),
@@ -904,7 +1117,8 @@ def assess_hermes_readiness(
         "runtime_bundle": _runtime_bundle_dir(resolved).is_dir(),
         "profile_manifest": _runtime_profile_manifest_path(resolved).is_file(),
         "profile_dir": profile_dir.is_dir(),
-        "profile_yaml": profile_yaml.is_file(),
+        "profile_config": profile_config.is_file(),
+        "spec_profile": spec_profile.is_file(),
         "logs_dir": logs_dir.is_dir(),
     }
     legacy_database_files = sorted(
@@ -914,10 +1128,15 @@ def assess_hermes_readiness(
     )
 
     blocking_items: list[str] = []
-    drift_items = [VERSION_DRIFT_NOTE, PROFILE_DRIFT_NOTE, CHECKLIST_COVERAGE_NOTE]
+    drift_items = [VERSION_DRIFT_NOTE, PROFILE_DRIFT_NOTE, CONFIG_SURFACE_UNCERTAINTY_NOTE]
     missing_paths = [name for name, ok in path_status.items() if not ok]
     if missing_paths:
         blocking_items.append(f"missing expected Hermes paths: {', '.join(missing_paths)}")
+    if not profile_validation.ok:
+        blocking_items.append(
+            "generated Hermes profile validation failed: "
+            f"{', '.join(profile_validation.issues)}"
+        )
     failed_databases = [name for name, ok in database_status.items() if not ok]
     if failed_databases:
         blocking_items.append(f"schema deployment/verification failed for: {', '.join(failed_databases)}")
@@ -936,13 +1155,7 @@ def assess_hermes_readiness(
     profile_listed = False
     live_tools: list[str] = []
     seed_tool_status = {tool_name: False for tool_name in EXPECTED_SEED_TOOLS}
-    config_status = {
-        "local_routing_endpoint": False,
-        "strong_model_hint": False,
-        "max_api_spend_zero": False,
-        "dangerous_command_patterns": False,
-        "approvals_not_off": False,
-    }
+    config_status = dict(profile_validation.checks)
     cli_smoke_attempted = False
     cli_smoke_ok = False
     cli_smoke_marker: str | None = None
@@ -1008,26 +1221,24 @@ def assess_hermes_readiness(
         config_result = _run_command_candidates(
             runner,
             [
+                (hermes_binary, "--profile", resolved.profile_name, "config", "show"),
+                (hermes_binary, "-p", resolved.profile_name, "config", "show"),
                 (hermes_binary, "--profile", resolved.profile_name, "config"),
                 (hermes_binary, "-p", resolved.profile_name, "config"),
+                (hermes_binary, "config", "show"),
                 (hermes_binary, "config"),
             ],
         )
-        config_texts = [config_result.stdout]
-        if profile_yaml.is_file():
-            config_texts.append(profile_yaml.read_text(encoding="utf-8"))
-        if not config_result.ok and not profile_yaml.is_file():
+        if not config_result.ok:
+            blocking_items.append(f"Could not probe Hermes config surface: {_format_probe_failure(config_result)}")
+        elif not (config_result.stdout or config_result.stderr):
+            blocking_items.append("Hermes config probe returned empty output.")
+        failed_config_checks = [name for name, ok in config_status.items() if not ok]
+        if failed_config_checks:
             blocking_items.append(
-                f"Could not inspect Hermes config/profile text: {_format_probe_failure(config_result)}"
+                "generated profile/config assertions failed: "
+                f"{', '.join(failed_config_checks)}"
             )
-        else:
-            config_status = _audit_config_texts(config_texts)
-            failed_config_checks = [name for name, ok in config_status.items() if not ok]
-            if failed_config_checks:
-                blocking_items.append(
-                    "config assertions failed: "
-                    f"{', '.join(failed_config_checks)}"
-                )
 
         if run_cli_smoke:
             cli_smoke_attempted = True
@@ -1075,6 +1286,7 @@ def assess_hermes_readiness(
         live_tools=live_tools,
         seed_tool_status=seed_tool_status,
         config_status=config_status,
+        profile_validation=profile_validation,
         path_status=path_status,
         database_status=database_status,
         legacy_database_files=legacy_database_files,
@@ -1685,6 +1897,9 @@ def main() -> int:
     if args.install_profile:
         result = install_runtime_profile(config, repo_root=args.repo_root)
         print(f"profile manifest={result.profile_manifest_path}")
+        print(f"profile_dir={result.profile_dir}")
+        print(f"profile_config={result.profile_config_path}")
+        print(f"spec_profile={result.spec_profile_path}")
         print(f"launchers={','.join(sorted(result.launcher_paths.values()))}")
         print(f"linked_skills={len(result.linked_skill_paths)}")
         return 0
@@ -1741,6 +1956,13 @@ def main() -> int:
         print(f"alert_id={result.alert_id or 'none'}")
         if result.error:
             print(f"error={result.error}")
+        return 0 if result.ok else 1
+
+    if args.bootstrap_live:
+        result = bootstrap_runtime(runtime, config=config, model_name=args.model_name)
+        print("bootstrap ok" if result.ok else "bootstrap failed")
+        print(f"session_id={result.session_context.session_id}")
+        print(f"tools={','.join(result.registered_tools)}")
         return 0 if result.ok else 1
 
     result = bootstrap_runtime(runtime, config=config, model_name=args.model_name)
