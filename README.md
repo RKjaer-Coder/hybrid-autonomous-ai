@@ -10,6 +10,22 @@ contains the persistence layer, routing contracts, immune guardrails, Hermes
 integration scaffolding, milestone evals, and a deterministic runtime proof.
 It is still pre-live from a real Hermes deployment perspective.
 
+## Latest Progress
+
+As of April 15, 2026, GitHub `main` includes the latest validated Hermes
+runtime attachment work:
+
+- repo-owned Hermes profile generation under `~/.hermes/profiles/<profile>/`
+- a docs-aligned `config.yaml` plus a spec-compat `profile.yaml` projection
+- structural profile validation in both `--doctor` and `--readiness`
+- an explicit `--bootstrap-live` CLI path that matches the generated launchers
+- deterministic runtime proof coverage for install, bootstrap, workflow, and
+  post-workflow doctor checks
+
+The highest-priority remaining step is still hardware-gated: run the readiness
+flow against a real Hermes installation on the Mac Studio and confirm the live
+CLI/profile surface end to end.
+
 ## What Is In This Repo
 
 Today, this repository includes:
@@ -21,10 +37,11 @@ Today, this repository includes:
 - research, strategic-memory, opportunity, operator, and observability skills
 - milestone eval harnesses and deterministic fixtures
 - a Hermes runtime integration layer that can prepare a local profile bundle,
-  migrate the databases, bootstrap a runtime, run a doctor check, run a
-  real-Hermes readiness check against the operator bootstrap checklist, and
-  prove a deterministic operator workflow plus a council-backed opportunity
-  and phase-gate path against a mock runtime
+  generate repo-owned Hermes profile artifacts, migrate the databases,
+  bootstrap a runtime, run a doctor check that validates the runtime layout
+  and generated profile files, run a real-Hermes readiness check against the
+  operator bootstrap checklist, and prove a deterministic operator workflow
+  plus a council-backed opportunity and phase-gate path against a mock runtime
 - GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
   pull requests to `main`
 
@@ -113,6 +130,18 @@ Run the deterministic runtime proof:
 python3 -m skills.runtime --operator-workflow
 ```
 
+Run the explicit runtime bootstrap path:
+
+```bash
+python3 -m skills.runtime --bootstrap-live
+```
+
+Run the runtime doctor check:
+
+```bash
+python3 -m skills.runtime --doctor
+```
+
 Run the real-Hermes readiness command:
 
 ```bash
@@ -144,6 +173,13 @@ they do not clearly document a first-class `dangerous_commands` config schema,
 so the repo continues to project and validate the §7.5c dangerous-command set
 as a repo-owned contract until live Hermes proves the exact upstream key
 shape.
+
+On machines without Hermes installed yet, you can still verify the offline
+attachment path without attempting the live chat smoke test:
+
+```bash
+python3 -m skills.runtime --readiness --skip-cli-smoke
+```
 
 That runtime proof now exercises this chain from a clean layout:
 
