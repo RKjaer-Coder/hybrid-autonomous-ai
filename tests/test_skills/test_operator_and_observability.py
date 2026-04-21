@@ -4,6 +4,7 @@ import datetime
 import json
 import uuid
 
+from harness_variants import ExecutionTrace, ExecutionTraceStep, HarnessVariantManager
 from financial_router.types import BudgetState, JWTClaims, ModelInfo, SystemPhase, TaskMetadata
 from immune.circuit_breakers import CircuitBreakerLogger
 from immune.config import load_config
@@ -1159,3 +1160,97 @@ def test_research_domain_can_list_and_complete_tasks(test_data_dir):
     assert pending[0]["task_id"] == task_id
     assert pending[0]["tags"] == ["market"]
     assert completed["status"] == "COMPLETE"
+
+
+def test_operator_and_observability_surface_harness_variants_and_traces(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, None, None)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="trace-runtime-1",
+            task_id="task-runtime-1",
+            role="runtime_contract",
+            skill_name="runtime",
+            harness_version="v1",
+            intent_goal="prove runtime contract",
+            steps=[
+                ExecutionTraceStep(
+                    step_index=1,
+                    tool_call="financial_router.route",
+                    tool_result='{"tier":"paid_cloud"}',
+                    tool_result_file=None,
+                    tokens_in=0,
+                    tokens_out=0,
+                    latency_ms=3,
+                    model_used="repo-contract",
+                )
+            ],
+            prompt_template="contract harness",
+            context_assembled="runtime+operator",
+            retrieval_queries=[],
+            judge_verdict="PASS",
+            judge_reasoning="ok",
+            outcome_score=1.0,
+            cost_usd=0.0,
+            duration_ms=20,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-runtime-1",
+            source_session_id="session-runtime-1",
+            source_trace_id=None,
+            created_at="2026-04-21T12:00:00+00:00",
+        )
+    )
+
+    proposed = operator.propose_harness_variant(
+        skill_name="research_domain",
+        parent_version="abc123",
+        diff="@@ -1 +1 @@\n-old\n+new\n",
+        reference_time="2026-04-21T12:01:00+00:00",
+    )
+    shadow = operator.start_harness_variant_shadow_eval(
+        variant_id=proposed["variant_id"],
+        reference_time="2026-04-21T12:02:00+00:00",
+    )
+    promoted = operator.record_harness_variant_eval(
+        variant_id=proposed["variant_id"],
+        benchmark_name="shadow_replay_research_domain",
+        baseline_outcome_scores=[0.7, 0.8],
+        variant_outcome_scores=[0.8, 0.85],
+        regression_rate=0.0,
+        gate_0_pass=True,
+        known_bad_block_rate=1.0,
+        gate_1_pass=True,
+        baseline_mean_score=0.75,
+        variant_mean_score=0.825,
+        quality_delta=0.075,
+        gate_2_pass=True,
+        baseline_std=0.05,
+        variant_std=0.03,
+        gate_3_pass=True,
+        regressed_trace_count=0,
+        improved_trace_count=2,
+        net_trace_gain=2,
+        traces_evaluated=2,
+        compute_cost_cu=1.0,
+        eval_duration_ms=120,
+        reference_time="2026-04-21T12:03:00+00:00",
+    )
+
+    assert shadow["status"] == "SHADOW_EVAL"
+    assert promoted["status"] == "PROMOTED"
+
+    traces = operator.list_execution_traces(limit=5, skill_name="runtime")
+    variants = operator.list_harness_variants(limit=5, skill_name="research_domain")
+    frontier = observability.harness_frontier(limit=5, skill_name="research_domain")
+    health = observability.system_health()
+
+    assert traces[0]["trace_id"] == "trace-runtime-1"
+    assert variants[0]["variant_id"] == proposed["variant_id"]
+    assert frontier[0]["variant_id"] == proposed["variant_id"]
+    assert health["harness_variants"]["execution_traces"]["total_count"] == 1
+    assert health["harness_variants"]["execution_traces"]["training_eligible_count"] == 1
+    assert health["harness_variants"]["variants"]["promoted_count"] == 1

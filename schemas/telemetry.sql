@@ -25,6 +25,70 @@ CREATE TABLE IF NOT EXISTS chain_definitions (
   updated_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS execution_traces (
+  trace_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  skill_name TEXT NOT NULL,
+  harness_version TEXT NOT NULL,
+  intent_goal TEXT NOT NULL,
+  steps_json TEXT NOT NULL CHECK (json_valid(steps_json)),
+  prompt_template TEXT NOT NULL,
+  context_assembled TEXT NOT NULL,
+  retrieval_queries_json TEXT NOT NULL CHECK (json_valid(retrieval_queries_json)),
+  judge_verdict TEXT NOT NULL CHECK (judge_verdict IN ('PASS', 'FAIL', 'PARTIAL')),
+  judge_reasoning TEXT NOT NULL,
+  outcome_score REAL NOT NULL CHECK (outcome_score >= 0.0 AND outcome_score <= 1.0),
+  cost_usd REAL NOT NULL CHECK (cost_usd >= 0.0),
+  duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+  training_eligible INTEGER NOT NULL DEFAULT 1 CHECK (training_eligible IN (0, 1)),
+  retention_class TEXT NOT NULL DEFAULT 'STANDARD' CHECK (retention_class IN ('STANDARD', 'FAILURE_AUDIT')),
+  source_chain_id TEXT,
+  source_session_id TEXT,
+  source_trace_id TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_execution_traces_skill_created ON execution_traces(skill_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_traces_training_created ON execution_traces(training_eligible, created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_traces_retention_created ON execution_traces(retention_class, created_at);
+
+CREATE TABLE IF NOT EXISTS harness_variants (
+  variant_id TEXT PRIMARY KEY,
+  skill_name TEXT NOT NULL,
+  parent_version TEXT NOT NULL,
+  diff TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('track_a', 'operator', 'proposer')),
+  status TEXT NOT NULL CHECK (status IN ('PROPOSED', 'SHADOW_EVAL', 'PROMOTED', 'REJECTED')),
+  prompt_prelude TEXT NOT NULL DEFAULT '',
+  retrieval_strategy_diff TEXT NOT NULL DEFAULT '',
+  scoring_formula_diff TEXT NOT NULL DEFAULT '',
+  context_assembly_diff TEXT NOT NULL DEFAULT '',
+  touches_infrastructure INTEGER NOT NULL DEFAULT 0 CHECK (touches_infrastructure IN (0, 1)),
+  reject_reason TEXT,
+  eval_result_json TEXT CHECK (eval_result_json IS NULL OR json_valid(eval_result_json)),
+  promoted_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_hv_skill_status ON harness_variants(skill_name, status);
+CREATE INDEX IF NOT EXISTS idx_hv_created ON harness_variants(created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hv_active_skill ON harness_variants(skill_name)
+WHERE status IN ('PROPOSED', 'SHADOW_EVAL');
+
+CREATE VIEW IF NOT EXISTS harness_frontier AS
+SELECT
+  skill_name,
+  variant_id,
+  json_extract(eval_result_json, '$.quality_delta') AS quality_delta,
+  json_extract(eval_result_json, '$.regression_rate') AS regression_rate,
+  json_extract(eval_result_json, '$.traces_evaluated') AS traces_evaluated,
+  promoted_at
+FROM harness_variants
+WHERE status = 'PROMOTED'
+ORDER BY promoted_at DESC, variant_id DESC;
+
 -- Rolling reliability by step_type x skill over 7d and 30d windows.
 CREATE VIEW IF NOT EXISTS reliability_by_step AS
 SELECT

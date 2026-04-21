@@ -14,6 +14,7 @@ from skills.runtime import (
     assess_hermes_readiness,
     bootstrap_runtime,
     doctor_runtime,
+    exercise_hermes_contract,
     install_runtime_profile,
     make_session_context,
     main as runtime_main,
@@ -123,6 +124,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert spec_profile["profile"] == "hybrid-test"
     assert spec_profile["limits"]["max_api_spend_usd"] == 0.0
     assert "readiness" in manifest["commands"]
+    assert "contract_harness" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
         launcher = Path(launcher_path)
@@ -149,6 +151,46 @@ def test_doctor_runtime_reports_ready_runtime(tmp_path):
     assert all(result.database_status.values())
     assert result.profile_validation.ok is True
     assert result.path_status["readiness_launcher"] is True
+    assert result.path_status["contract_harness_launcher"] is True
+
+
+def test_exercise_hermes_contract_runs_full_lifecycle_and_logs_trace(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+        profile_name="hybrid-test",
+    )
+
+    result = exercise_hermes_contract(config=cfg, repo_root=str(tmp_path))
+
+    assert result.ok is True
+    assert result.bootstrap.ok is True
+    assert result.doctor.ok is True
+    assert all(result.contract_checks.values())
+    assert result.route_decision is not None
+    assert result.route_decision["tier"] == "paid_cloud"
+    assert result.approval_request is not None
+    assert result.approval_review is not None
+    assert result.approval_review["status"] == "APPROVED"
+    assert result.dispatch_result is not None
+    assert result.dispatch_result["dispatch_status"] == "DISPATCHED"
+    assert result.runtime_halt is not None
+    assert result.runtime_halt["source"] == "JUDGE_DEADLOCK"
+    assert result.blocked_dispatch_pre_side_effect is True
+    assert result.restart_result is not None
+    assert result.restart_result["status"] == "COMPLETED"
+    assert result.final_runtime_status is not None
+    assert result.final_runtime_status["lifecycle_state"] == "ACTIVE"
+    assert result.trace_id is not None
+
+    with sqlite3.connect(Path(cfg.data_dir) / "telemetry.db") as conn:
+        row = conn.execute(
+            "SELECT judge_verdict, retention_class FROM execution_traces WHERE trace_id = ?",
+            (result.trace_id,),
+        ).fetchone()
+    assert row == ("PASS", "STANDARD")
 
 
 def test_doctor_runtime_detects_corrupted_profile_artifacts(tmp_path):
@@ -257,6 +299,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     assert result.profile_validation.ok is True
     assert Path(result.checkpoint_backup_path).is_file()
     assert result.doctor.ok is True
+    assert result.contract_harness.ok is True
     assert not result.blocking_items
 
 
@@ -317,6 +360,57 @@ def test_assess_hermes_readiness_rejects_0_8_x_even_if_checklist_allows_it(tmp_p
     assert result.profile_validation.ok is True
     assert any("below the manifest floor" in item for item in result.blocking_items)
     assert VERSION_DRIFT_NOTE in result.drift_items
+
+
+def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path, monkeypatch):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+        profile_name="hybrid-test",
+    )
+    (tmp_path / "logs").mkdir()
+
+    monkeypatch.setattr("skills.runtime.shutil.which", lambda _name: "/usr/bin/hermes")
+
+    def runner(argv):
+        key = tuple(argv)
+        if key == ("hermes", "--version"):
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.9.1", "")
+        if key == ("hermes", "profile", "list"):
+            return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
+        if key == ("hermes", "tools", "list"):
+            return ExternalCommandResult(True, key, 0, "code_execution\nfile_operations\nweb_search\nweb_fetch\nshell_command\n", "")
+        if key == ("hermes", "--profile", "hybrid-test", "config", "show"):
+            return ExternalCommandResult(
+                True,
+                key,
+                0,
+                json.dumps(
+                    {
+                        "approvals": {"mode": "auto"},
+                        "model": {"provider": "custom", "default": "hybrid-autonomous-ai-local", "base_url": "http://127.0.0.1:8080/v1"},
+                        "fallback_model": {"provider": "main", "model": "hybrid-autonomous-ai-strong"},
+                        "skills": {"config": {"hybrid_autonomous_ai": {"profile_name": "hybrid-test", "routing": {"max_api_spend_usd": 0.0}, "runtime": {"data_dir": str(tmp_path / 'data')}}}},
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(f"unexpected command: {key}")
+
+    result = assess_hermes_readiness(
+        config=cfg,
+        repo_root=str(tmp_path),
+        run_cli_smoke=False,
+        command_runner=runner,
+    )
+
+    assert result.ok is False
+    assert result.contract_harness.ok is True
+    assert result.config_status["approvals_manual"] is False
+    assert result.config_status["dangerous_commands"] is False
+    assert any("profile/config contract assertions failed" in item for item in result.blocking_items)
 
 
 def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path, monkeypatch):

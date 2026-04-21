@@ -1,22 +1,44 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import datetime
 import json
+import os
 import re
 import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 import time
+import types
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from financial_router.types import BudgetState, JWTClaims, ModelInfo, TaskMetadata
-from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST
-from immune.types import JudgePayload, Outcome, SheriffPayload, generate_uuid_v7
+from financial_router.types import BudgetState, JWTClaims, ModelInfo, SystemPhase, TaskMetadata
+from harness_variants import ExecutionTrace, ExecutionTraceStep, HarnessVariantManager
+from hermes_profile_contract import HermesProfileContract
+from immune.bootstrap_patch import apply_immune_patch
+from immune.config import load_config
+from immune.judge_lifecycle import JudgeLifecycleManager
+from immune.types import (
+    AlertSeverity,
+    BlockReason,
+    CheckType,
+    ImmuneBlockError,
+    ImmuneVerdict,
+    JudgeMode,
+    JudgePayload,
+    Outcome,
+    SheriffPayload,
+    Tier,
+    generate_uuid_v7,
+)
+from immune.verdict_logger import VerdictLogger
 from migrate import SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
@@ -62,19 +84,6 @@ CONFIG_SURFACE_UNCERTAINTY_NOTE = (
     "validates the §7.5c dangerous-command set as a repo-owned contract until "
     "live Hermes proves the exact upstream key shape."
 )
-EXPECTED_DANGEROUS_COMMAND_FAMILIES: dict[str, tuple[str, ...]] = {
-    "rm_rf": ("rm -rf", "rm\\s+(-[rrf]+\\s+)*[/~]"),
-    "chmod_777": ("chmod 777", "chmod\\s+[0-7]*777"),
-    "sudo_root": ("sudo", "su root", "su\\s+root", "doas"),
-    "disk_ops": ("mkfs", "fdisk", "dd if=", "of=/dev"),
-    "firewall_ops": ("iptables", "ufw", "firewall-cmd"),
-}
-PROFILE_CONFIG_SKILL_KEY = "hybrid_autonomous_ai"
-DEFAULT_LOCAL_MODEL = "hybrid-autonomous-ai-local"
-DEFAULT_STRONG_MODEL = "hybrid-autonomous-ai-strong"
-DEFAULT_LOCAL_BASE_URL = f"http://127.0.0.1:{min(CONSTRUCTION_ALLOWLIST.permitted_ports)}/v1"
-
-
 @dataclass(frozen=True)
 class RuntimeBootstrapResult:
     """Structured result for a Hermes integration bootstrap attempt."""
@@ -166,6 +175,7 @@ class HermesReadinessResult:
     drift_items: list[str]
     install: RuntimeProfileInstallResult
     doctor: RuntimeDoctorResult
+    contract_harness: HermesContractHarnessResult
 
 
 @dataclass(frozen=True)
@@ -203,6 +213,29 @@ class OperatorWorkflowResult:
     observability: WorkflowObservabilitySnapshot | None
     doctor: RuntimeDoctorResult
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class HermesContractHarnessResult:
+    """Repo-local Hermes-parity lifecycle proof without requiring a live Hermes install."""
+
+    ok: bool
+    config: IntegrationConfig
+    bootstrap: RuntimeBootstrapResult
+    doctor: RuntimeDoctorResult
+    contract_checks: dict[str, bool]
+    route_decision: dict[str, Any] | None
+    approval_request: dict[str, Any] | None
+    approval_review: dict[str, Any] | None
+    dispatch_result: dict[str, Any] | None
+    judge_deadlock_event: dict[str, Any] | None
+    runtime_halt: dict[str, Any] | None
+    blocked_dispatch_pre_side_effect: bool
+    blocked_dispatch_reason: str | None
+    restart_result: dict[str, Any] | None
+    final_runtime_status: dict[str, Any] | None
+    trace_id: str | None
+    issues: list[str]
 
 
 def _utc_now() -> str:
@@ -505,6 +538,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "doctor": bin_dir / "doctor_runtime.sh",
         "readiness": bin_dir / "readiness_runtime.sh",
         "operator_workflow": bin_dir / "run_operator_workflow.sh",
+        "contract_harness": bin_dir / "contract_harness_runtime.sh",
     }
 
 
@@ -539,6 +573,21 @@ def _runtime_profile_validation_repo_root(config: IntegrationConfig) -> Path:
         if isinstance(repo_root, str) and repo_root.strip():
             return Path(repo_root).expanduser().resolve()
     return _repo_root()
+
+
+@contextlib.contextmanager
+def _temporary_env(overrides: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in overrides}
+    try:
+        for key, value in overrides.items():
+            os.environ[key] = value
+        yield
+    finally:
+        for key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
 def _run_external_command(argv: Sequence[str]) -> ExternalCommandResult:
@@ -612,98 +661,6 @@ def _run_command_candidates(
     return last_result
 
 
-def _representative_dangerous_commands() -> list[str]:
-    return [variants[0] for variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.values()]
-
-
-def _repo_owned_runtime_mapping(config: IntegrationConfig, repo_root: Path) -> dict[str, Any]:
-    return {
-        "repo_root": str(repo_root),
-        "data_dir": config.data_dir,
-        "skills_dir": config.skills_dir,
-        "checkpoints_dir": config.checkpoints_dir,
-        "alerts_dir": config.alerts_dir,
-        "logs_dir": str(_runtime_logs_dir(config)),
-    }
-
-
-def _repo_owned_skill_config(config: IntegrationConfig, repo_root: Path) -> dict[str, Any]:
-    return {
-        "profile_name": config.profile_name,
-        "repo_contract_version": 1,
-        "construction_phase": config.construction_phase,
-        "runtime": _repo_owned_runtime_mapping(config, repo_root),
-        "routing": {
-            "local_endpoint": DEFAULT_LOCAL_BASE_URL,
-            "local_model": DEFAULT_LOCAL_MODEL,
-            "fallback_endpoint": DEFAULT_LOCAL_BASE_URL,
-            "strong_model_strategy": "frontier-if-configured-else-local",
-            "max_api_spend_usd": config.max_api_spend_usd,
-        },
-        "dangerous_command_families": {name: list(variants) for name, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()},
-    }
-
-
-def _build_hermes_profile_documents(config: IntegrationConfig, repo_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    runtime_mapping = _repo_owned_runtime_mapping(config, repo_root)
-    skill_config = _repo_owned_skill_config(config, repo_root)
-    dangerous_commands = _representative_dangerous_commands()
-    config_doc = {
-        "model": {
-            "provider": "custom",
-            "default": DEFAULT_LOCAL_MODEL,
-            "base_url": DEFAULT_LOCAL_BASE_URL,
-            "api_key": "local-construction",
-        },
-        "fallback_model": {
-            "provider": "main",
-            "model": DEFAULT_STRONG_MODEL,
-        },
-        "approvals": {
-            "mode": "manual",
-        },
-        "terminal": {
-            "backend": "local",
-        },
-        "checkpoints": {
-            "enabled": True,
-            "max_snapshots": 20,
-        },
-        "dangerous_commands": dangerous_commands,
-        "skills": {
-            "config": {
-                PROFILE_CONFIG_SKILL_KEY: skill_config,
-            }
-        },
-    }
-    spec_profile_doc = {
-        "profile": config.profile_name,
-        "routing": {
-            "local_model": {
-                "provider": "custom",
-                "default": DEFAULT_LOCAL_MODEL,
-                "base_url": DEFAULT_LOCAL_BASE_URL,
-            },
-            "strong_model": {
-                "strategy": "frontier-if-configured-else-local",
-                "fallback_model": {
-                    "provider": "main",
-                    "model": DEFAULT_STRONG_MODEL,
-                },
-            },
-        },
-        "limits": {
-            "max_api_spend_usd": config.max_api_spend_usd,
-        },
-        "approvals": {
-            "mode": "manual",
-        },
-        "dangerous_commands": dangerous_commands,
-        "runtime": runtime_mapping,
-    }
-    return config_doc, spec_profile_doc
-
-
 def _write_json_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
 
@@ -720,55 +677,14 @@ def _read_json_yaml(path: Path) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _nested_get(payload: dict[str, Any], *keys: str) -> Any:
-    current: Any = payload
-    for key in keys:
-        if not isinstance(current, dict) or key not in current:
-            return None
-        current = current[key]
-    return current
-
-
-def _contains_subset(actual: Any, expected: Any) -> bool:
-    if isinstance(expected, dict):
-        if not isinstance(actual, dict):
-            return False
-        return all(key in actual and _contains_subset(actual[key], value) for key, value in expected.items())
-    if isinstance(expected, list):
-        if not isinstance(actual, list):
-            return False
-        return all(any(_contains_subset(candidate, item) for candidate in actual) for item in expected)
-    return actual == expected
-
-
 def _validate_profile_artifacts(config: IntegrationConfig, repo_root: Path) -> HermesProfileValidationResult:
     config_path = _runtime_profile_config_path(config)
     spec_profile_path = _runtime_spec_profile_path(config)
-    expected_config_doc, expected_spec_profile_doc = _build_hermes_profile_documents(config, repo_root)
+    contract = HermesProfileContract(config=config, repo_root=str(repo_root))
     actual_config_doc = _read_json_yaml(config_path) if config_path.is_file() else None
     actual_spec_profile_doc = _read_json_yaml(spec_profile_path) if spec_profile_path.is_file() else None
 
-    checks = {
-        "config_yaml_shape": actual_config_doc is not None and _contains_subset(actual_config_doc, expected_config_doc),
-        "spec_profile_yaml_shape": actual_spec_profile_doc is not None and _contains_subset(actual_spec_profile_doc, expected_spec_profile_doc),
-        "profile_name": _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name") == config.profile_name,
-        "local_model": _nested_get(actual_config_doc or {}, "model", "provider") == "custom"
-        and _nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
-        and _nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
-        "fallback_model": _nested_get(actual_config_doc or {}, "fallback_model", "provider") == "main"
-        and _nested_get(actual_config_doc or {}, "fallback_model", "model") == DEFAULT_STRONG_MODEL,
-        "max_api_spend_zero": _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "routing", "max_api_spend_usd")
-        == 0.0,
-        "approvals_manual": _nested_get(actual_config_doc or {}, "approvals", "mode") == "manual",
-        "dangerous_commands": _contains_subset(
-            _nested_get(actual_config_doc or {}, "dangerous_commands") or [],
-            _representative_dangerous_commands(),
-        ),
-        "runtime_paths": _contains_subset(
-            _nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
-            _repo_owned_runtime_mapping(config, repo_root),
-        ),
-    }
+    checks = contract.generated_checks(actual_config_doc, actual_spec_profile_doc)
     issues = [name for name, ok in checks.items() if not ok]
     return HermesProfileValidationResult(
         ok=not issues,
@@ -796,6 +712,36 @@ def _snapshot_runtime_data(config: IntegrationConfig) -> str:
     with tarfile.open(snapshot_path, "w:gz") as archive:
         archive.add(Path(config.data_dir), arcname="data")
     return str(snapshot_path)
+
+
+def _log_execution_trace(config: IntegrationConfig, trace: ExecutionTrace) -> dict[str, Any]:
+    telemetry_db_path = Path(config.data_dir) / "telemetry.db"
+    manager = HarnessVariantManager(str(telemetry_db_path))
+    return manager.log_execution_trace(trace)
+
+
+def _install_fake_dispatch_module(dispatch: Callable[..., Any]) -> dict[str, types.ModuleType | None]:
+    previous = {
+        "hermes": sys.modules.get("hermes"),
+        "hermes.tools": sys.modules.get("hermes.tools"),
+        "hermes.tools.base": sys.modules.get("hermes.tools.base"),
+    }
+    hermes = types.ModuleType("hermes")
+    tools = types.ModuleType("hermes.tools")
+    base = types.ModuleType("hermes.tools.base")
+    base.execute_tool = dispatch
+    sys.modules["hermes"] = hermes
+    sys.modules["hermes.tools"] = tools
+    sys.modules["hermes.tools.base"] = base
+    return previous
+
+
+def _restore_fake_dispatch_module(previous: dict[str, types.ModuleType | None]) -> None:
+    for key, module in previous.items():
+        if module is None:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = module
 
 
 def _capture_log_state(log_dir: Path) -> dict[Path, tuple[float, int]]:
@@ -944,6 +890,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "doctor": _command_string(resolved, "--doctor", root),
             "readiness": _command_string(resolved, "--readiness", root),
             "operator_workflow": _command_string(resolved, "--operator-workflow", root),
+            "contract_harness": _command_string(resolved, "--contract-harness", root),
         },
     }
     manifest_path = _runtime_profile_manifest_path(resolved)
@@ -951,7 +898,9 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
 
     profile_dir = _runtime_profile_dir(resolved)
     profile_dir.mkdir(parents=True, exist_ok=True)
-    config_doc, spec_profile_doc = _build_hermes_profile_documents(resolved, root)
+    contract = HermesProfileContract(config=resolved, repo_root=str(root))
+    config_doc = contract.config_document()
+    spec_profile_doc = contract.spec_profile_document()
     _write_json_yaml(_runtime_profile_config_path(resolved), config_doc)
     _write_json_yaml(_runtime_spec_profile_path(resolved), spec_profile_doc)
 
@@ -959,6 +908,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["doctor"], resolved, root, "--doctor")
     _write_launcher(launcher_paths["readiness"], resolved, root, "--readiness")
     _write_launcher(launcher_paths["operator_workflow"], resolved, root, "--operator-workflow")
+    _write_launcher(launcher_paths["contract_harness"], resolved, root, "--contract-harness")
 
     return RuntimeProfileInstallResult(
         config=resolved,
@@ -1050,6 +1000,7 @@ def doctor_runtime(
         "doctor_launcher": launcher_paths["doctor"].is_file(),
         "readiness_launcher": launcher_paths["readiness"].is_file(),
         "operator_workflow_launcher": launcher_paths["operator_workflow"].is_file(),
+        "contract_harness_launcher": launcher_paths["contract_harness"].is_file(),
     }
     profile_validation = _validate_profile_artifacts(
         resolved,
@@ -1088,6 +1039,376 @@ def doctor_runtime(
     )
 
 
+def exercise_hermes_contract(
+    *,
+    config: IntegrationConfig | None = None,
+    repo_root: str | None = None,
+    tool_registry: HermesToolRegistry | None = None,
+) -> HermesContractHarnessResult:
+    """Exercise the repo-local Hermes gate/dispatch/halt/restart contract end to end."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
+    issues: list[str] = []
+    route_decision: dict[str, Any] | None = None
+    approval_request: dict[str, Any] | None = None
+    approval_review: dict[str, Any] | None = None
+    dispatch_result: dict[str, Any] | None = None
+    judge_deadlock_event: dict[str, Any] | None = None
+    runtime_halt: dict[str, Any] | None = None
+    restart_result: dict[str, Any] | None = None
+    final_runtime_status: dict[str, Any] | None = None
+    trace_id: str | None = None
+    blocked_dispatch_pre_side_effect = False
+    blocked_dispatch_reason: str | None = None
+    trace_steps: list[ExecutionTraceStep] = []
+
+    def append_trace_step(step_name: str, payload: Any, *, model_used: str = "repo-contract") -> None:
+        serialized = payload if isinstance(payload, str) else json.dumps(payload, sort_keys=True, default=str)
+        trace_steps.append(
+            ExecutionTraceStep(
+                step_index=len(trace_steps) + 1,
+                tool_call=step_name,
+                tool_result=serialized[:4096],
+                tool_result_file=None,
+                tokens_in=0,
+                tokens_out=0,
+                latency_ms=0,
+                model_used=model_used,
+            )
+        )
+
+    env_overrides = {
+        "IMMUNE_JUDGE_DEADLOCK_WINDOW_SECONDS": "2",
+        "IMMUNE_JUDGE_DEADLOCK_FALLBACK_MINUTES": "1",
+        "IMMUNE_JUDGE_DEADLOCK_GUARD_HOURS": "1",
+    }
+    with _temporary_env(env_overrides):
+        install_runtime_profile(resolved, repo_root=str(root))
+        bootstrap = bootstrap_runtime(
+            registry,
+            config=resolved,
+            model_name="contract-harness",
+            jwt_claims={"max_api_spend_usd": 5.0, "current_session_spend_usd": 0.0},
+        )
+        doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
+        contract_checks = _validate_profile_artifacts(resolved, root).checks
+        if not bootstrap.ok:
+            issues.append("bootstrap failed")
+        if not doctor.ok:
+            issues.append("doctor failed")
+        failed_contract_checks = [name for name, ok in contract_checks.items() if not ok]
+        if failed_contract_checks:
+            issues.append(f"profile contract failed: {', '.join(failed_contract_checks)}")
+
+        session_id = bootstrap.session_context.session_id
+        correlation_id = f"contract-route-{generate_uuid_v7()}"
+        route = registry.invoke_tool(
+            "financial_router",
+            {
+                "action": "route",
+                "task": TaskMetadata(
+                    task_id=f"task-{generate_uuid_v7()}",
+                    task_type="hermes_contract_harness",
+                    required_capability="shell_command",
+                    quality_threshold=0.9,
+                    estimated_task_value_usd=500.0,
+                    project_id="contract-project",
+                    idempotency_key=correlation_id,
+                    is_operating_phase=True,
+                ),
+                "models": [ModelInfo("gpt-paid-strong", "paid", True, 0.99, 0.25)],
+                "budget": BudgetState(system_phase=SystemPhase.OPERATING),
+                "jwt": JWTClaims(session_id=session_id, max_api_spend_usd=5.0, current_session_spend_usd=0.0),
+            },
+        )
+        if not route.success:
+            issues.append(f"route failed: {route.error}")
+        else:
+            route_output = route.output
+            route_decision = {
+                "tier": route_output.tier.value,
+                "model_id": route_output.model_id,
+                "g3_path": route_output.g3_path.value,
+                "estimated_cost_usd": route_output.estimated_cost_usd,
+                "quality_warning": route_output.quality_warning,
+                "justification": route_output.justification,
+                "requires_operator_approval": route_output.requires_operator_approval,
+                "compute_starved": route_output.compute_starved,
+            }
+            append_trace_step("financial_router.route", route_decision)
+            if route_output.tier.value != "paid_cloud" or not route_output.requires_operator_approval:
+                issues.append("contract harness did not produce a Path B paid approval request")
+
+        pending_requests = registry.invoke_tool(
+            "operator_interface",
+            {"action": "list_g3_approval_requests", "limit": 5, "status": "PENDING"},
+        )
+        if not pending_requests.success:
+            issues.append(f"list_g3_approval_requests failed: {pending_requests.error}")
+        else:
+            approval_request = next(
+                (row for row in pending_requests.output if row["correlation_id"] == correlation_id),
+                None,
+            )
+            append_trace_step(
+                "operator_interface.list_g3_approval_requests",
+                {"pending_count": len(pending_requests.output), "matched": approval_request is not None},
+            )
+            if approval_request is None:
+                issues.append("approval request not found after paid route selection")
+
+        if approval_request is not None:
+            approval = registry.invoke_tool(
+                "operator_interface",
+                {
+                    "action": "review_g3_approval_request",
+                    "request_id": approval_request["request_id"],
+                    "decision": "APPROVE",
+                    "operator_notes": "contract harness approval",
+                },
+            )
+            if not approval.success:
+                issues.append(f"approval review failed: {approval.error}")
+            else:
+                approval_review = approval.output
+                append_trace_step("operator_interface.review_g3_approval_request", approval_review)
+                if approval_review["status"] != "APPROVED":
+                    issues.append("approval request did not move to APPROVED")
+
+        if approval_request is not None:
+            dispatch = registry.invoke_tool(
+                "operator_interface",
+                {
+                    "action": "dispatch_approved_paid_route",
+                    "correlation_id": correlation_id,
+                    "jwt_claims": {
+                        "session_id": session_id,
+                        "max_api_spend_usd": 5.0,
+                        "current_session_spend_usd": 0.0,
+                    },
+                },
+            )
+            if not dispatch.success:
+                issues.append(f"dispatch_approved_paid_route failed: {dispatch.error}")
+            else:
+                dispatch_result = dispatch.output
+                append_trace_step("operator_interface.dispatch_approved_paid_route", dispatch_result)
+                if dispatch_result["dispatch_status"] != "DISPATCHED":
+                    issues.append("paid route did not enter DISPATCHED state")
+
+        immune_db_path = Path(resolved.data_dir) / "immune_system.db"
+        judge_lifecycle = JudgeLifecycleManager(str(immune_db_path), load_config())
+        base_time = datetime.datetime(2026, 4, 21, 12, 0, tzinfo=datetime.timezone.utc)
+        deadlock_task_types = ["analysis", "routing", "operator_interface", "analysis"]
+        active_event_id: str | None = None
+        with sqlite3.connect(immune_db_path) as conn:
+            for offset, task_type in enumerate(deadlock_task_types):
+                ts = (base_time + datetime.timedelta(seconds=offset)).replace(microsecond=0).isoformat()
+                verdict = ImmuneVerdict(
+                    verdict_id=generate_uuid_v7(),
+                    check_type=CheckType.JUDGE,
+                    tier=Tier.FAST_PATH,
+                    skill_name="contract_harness",
+                    session_id=session_id,
+                    outcome=Outcome.BLOCK,
+                    block_reason=BlockReason.INTERNAL_ERROR,
+                    block_detail="contract deadlock sample",
+                    latency_ms=0.0,
+                    alert_severity=AlertSeverity.SECURITY_ALERT,
+                    judge_mode=JudgeMode.NORMAL,
+                    task_type=task_type,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO immune_verdicts (
+                        verdict_id, verdict_type, scan_tier, session_id, skill_name,
+                        task_type, result, match_pattern, latency_ms, judge_mode, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        verdict.verdict_id,
+                        "judge_output",
+                        verdict.tier.value,
+                        verdict.session_id,
+                        verdict.skill_name,
+                        verdict.task_type,
+                        verdict.outcome.value,
+                        verdict.block_reason.value,
+                        int(verdict.latency_ms),
+                        verdict.judge_mode.value,
+                        ts,
+                    ),
+                )
+                conn.commit()
+                event = judge_lifecycle.record_verdict(
+                    JudgePayload(
+                        session_id=session_id,
+                        skill_name="contract_harness",
+                        tool_name="shell_command",
+                        output={"ok": False},
+                        task_type=task_type,
+                    ),
+                    verdict,
+                    reference_time=ts,
+                )
+                if event is not None and event["status"] == "ACTIVE":
+                    active_event_id = event["event_id"]
+
+        if active_event_id is None:
+            issues.append("judge deadlock fallback did not activate")
+        else:
+            judge_deadlock_event = judge_lifecycle.status(
+                reference_time=(base_time + datetime.timedelta(seconds=3)).replace(microsecond=0).isoformat()
+            )["active_event"]
+            append_trace_step("judge_deadlock.activate", {"event_id": active_event_id, "status": "ACTIVE"})
+            runtime_control = RuntimeControlManager(str(Path(resolved.data_dir) / "operator_digest.db"))
+            runtime_halt = runtime_control.activate_halt(
+                source="JUDGE_DEADLOCK",
+                trigger_event_id=active_event_id,
+                halt_reason="contract_deadlock_halt",
+                halt_scope="FULL_SYSTEM_HALT",
+                requires_human=True,
+                reference_time=(base_time + datetime.timedelta(seconds=3)).replace(microsecond=0).isoformat(),
+            )
+            append_trace_step("runtime_control.activate_halt", runtime_halt)
+
+        runtime_status = registry.invoke_tool("operator_interface", {"action": "runtime_status"})
+        if not runtime_status.success:
+            issues.append(f"runtime_status failed: {runtime_status.error}")
+        else:
+            runtime_halt = runtime_status.output["active_halt"] or runtime_halt
+            append_trace_step("operator_interface.runtime_status", runtime_status.output)
+            if runtime_status.output["lifecycle_state"] != "HALTED":
+                issues.append("runtime did not enter HALTED state after judge deadlock halt")
+
+        dispatch_called = {"count": 0}
+
+        def _fake_dispatch(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            dispatch_called["count"] += 1
+            return {"ok": True, "claimed_trust_tier": 4}
+
+        def _pass_verdict(*_args: Any, **_kwargs: Any) -> ImmuneVerdict:
+            return ImmuneVerdict(
+                verdict_id=generate_uuid_v7(),
+                check_type=CheckType.SHERIFF,
+                tier=Tier.FAST_PATH,
+                skill_name="contract_harness",
+                session_id=session_id,
+                outcome=Outcome.PASS,
+                latency_ms=0.0,
+                task_type="hermes_contract_harness",
+            )
+
+        previous_modules = _install_fake_dispatch_module(_fake_dispatch)
+        try:
+            logger = VerdictLogger(str(immune_db_path), load_config())
+            if not apply_immune_patch(_pass_verdict, _pass_verdict, load_config(), logger):
+                issues.append("immune bootstrap patch could not be applied for contract harness")
+            else:
+                try:
+                    sys.modules["hermes.tools.base"].execute_tool(
+                        tool_name="safe_tool",
+                        arguments={},
+                        skill_name="contract_harness",
+                        session_id=session_id,
+                        execution_stack="immune_system",
+                        task_type="hermes_contract_harness",
+                    )
+                    issues.append("halted dispatch unexpectedly executed underlying tool")
+                except ImmuneBlockError as exc:
+                    blocked_dispatch_pre_side_effect = dispatch_called["count"] == 0
+                    blocked_dispatch_reason = str(exc)
+                    append_trace_step(
+                        "immune.bootstrap_patch.blocked_dispatch",
+                        {
+                            "blocked": True,
+                            "dispatch_called": dispatch_called["count"],
+                            "reason": blocked_dispatch_reason,
+                        },
+                    )
+                    if not blocked_dispatch_pre_side_effect:
+                        issues.append("halted dispatch called underlying tool before blocking")
+        finally:
+            _restore_fake_dispatch_module(previous_modules)
+
+        restart = registry.invoke_tool(
+            "operator_interface",
+            {
+                "action": "restart_runtime_after_halt",
+                "judge_event_id": active_event_id,
+                "restart_reason": "contract_harness_clear",
+                "notes": "Clear deadlock after contract harness proof",
+                "reference_time": (base_time + datetime.timedelta(seconds=8)).replace(microsecond=0).isoformat(),
+            },
+        )
+        if not restart.success:
+            issues.append(f"restart_runtime_after_halt failed: {restart.error}")
+        else:
+            restart_result = restart.output
+            append_trace_step("operator_interface.restart_runtime_after_halt", restart_result)
+            if restart_result["status"] != "COMPLETED":
+                issues.append("runtime restart did not complete after deadlock window cleared")
+
+        runtime_status_after = registry.invoke_tool("operator_interface", {"action": "runtime_status"})
+        if runtime_status_after.success:
+            final_runtime_status = runtime_status_after.output
+            append_trace_step("operator_interface.runtime_status.final", final_runtime_status)
+            if final_runtime_status["lifecycle_state"] != "ACTIVE":
+                issues.append("runtime did not return to ACTIVE after restart")
+        else:
+            issues.append(f"final runtime_status failed: {runtime_status_after.error}")
+
+        ok = not issues
+        trace_id = generate_uuid_v7()
+        _log_execution_trace(
+            resolved,
+            ExecutionTrace(
+                trace_id=trace_id,
+                task_id=f"contract-harness-{trace_id}",
+                role="runtime_contract",
+                skill_name="runtime",
+                harness_version="hermes_contract_harness_v1",
+                intent_goal="Validate repo-local Hermes gate, dispatch, halt, blocked execution, and restart contract.",
+                steps=trace_steps,
+                prompt_template="repo-local Hermes contract harness",
+                context_assembled="runtime profile + operator interface + judge deadlock + bootstrap patch",
+                retrieval_queries=[],
+                judge_verdict="PASS" if ok else "FAIL",
+                judge_reasoning="Contract harness completed end to end." if ok else "Contract harness exposed blocking issues.",
+                outcome_score=1.0 if ok else 0.0,
+                cost_usd=0.0,
+                duration_ms=0,
+                training_eligible=ok,
+                retention_class="STANDARD" if ok else "FAILURE_AUDIT",
+                source_chain_id=correlation_id,
+                source_session_id=session_id,
+                source_trace_id=None,
+                created_at=_utc_now(),
+            ),
+        )
+
+        return HermesContractHarnessResult(
+            ok=ok,
+            config=resolved,
+            bootstrap=bootstrap,
+            doctor=doctor,
+            contract_checks=contract_checks,
+            route_decision=route_decision,
+            approval_request=approval_request,
+            approval_review=approval_review,
+            dispatch_result=dispatch_result,
+            judge_deadlock_event=judge_deadlock_event,
+            runtime_halt=runtime_halt,
+            blocked_dispatch_pre_side_effect=blocked_dispatch_pre_side_effect,
+            blocked_dispatch_reason=blocked_dispatch_reason,
+            restart_result=restart_result,
+            final_runtime_status=final_runtime_status,
+            trace_id=trace_id,
+            issues=issues,
+        )
+
+
 def assess_hermes_readiness(
     *,
     config: IntegrationConfig | None = None,
@@ -1104,7 +1425,13 @@ def assess_hermes_readiness(
     repo_root_path = Path(install.repo_root)
     database_status = migrate_runtime_databases(resolved)
     registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
-    doctor = doctor_runtime(registry, config=resolved)
+    contract = HermesProfileContract(config=resolved, repo_root=str(repo_root_path))
+    contract_harness = exercise_hermes_contract(
+        config=resolved,
+        repo_root=str(repo_root_path),
+        tool_registry=registry,
+    )
+    doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
     checkpoint_backup_path = _snapshot_runtime_data(resolved)
     profile_validation = _validate_profile_artifacts(resolved, repo_root_path)
 
@@ -1150,6 +1477,11 @@ def assess_hermes_readiness(
             "install-profile/doctor compatibility failed: "
             f"{', '.join(doctor.missing_items) if doctor.missing_items else 'unknown doctor error'}"
         )
+    if not contract_harness.ok:
+        blocking_items.append(
+            "repo-local Hermes contract harness failed: "
+            f"{', '.join(contract_harness.issues)}"
+        )
 
     runner = command_runner or _run_external_command
     hermes_installed = shutil.which(hermes_binary) is not None
@@ -1158,7 +1490,7 @@ def assess_hermes_readiness(
     profile_listed = False
     live_tools: list[str] = []
     seed_tool_status = {tool_name: False for tool_name in EXPECTED_SEED_TOOLS}
-    config_status = dict(profile_validation.checks)
+    config_status = dict(contract_harness.contract_checks)
     cli_smoke_attempted = False
     cli_smoke_ok = False
     cli_smoke_marker: str | None = None
@@ -1236,10 +1568,22 @@ def assess_hermes_readiness(
             blocking_items.append(f"Could not probe Hermes config surface: {_format_probe_failure(config_result)}")
         elif not (config_result.stdout or config_result.stderr):
             blocking_items.append("Hermes config probe returned empty output.")
+        else:
+            parsed_config = None
+            try:
+                parsed_config = json.loads(config_result.stdout or config_result.stderr)
+            except json.JSONDecodeError:
+                blocking_items.append("Hermes config probe output was not parseable as structured JSON/YAML.")
+            else:
+                if not isinstance(parsed_config, dict):
+                    blocking_items.append("Hermes config probe returned a non-object payload.")
+                    parsed_config = None
+            if parsed_config is not None:
+                config_status = contract.live_config_checks(parsed_config)
         failed_config_checks = [name for name, ok in config_status.items() if not ok]
         if failed_config_checks:
             blocking_items.append(
-                "generated profile/config assertions failed: "
+                "profile/config contract assertions failed: "
                 f"{', '.join(failed_config_checks)}"
             )
 
@@ -1304,6 +1648,7 @@ def assess_hermes_readiness(
         drift_items=drift_items,
         install=install,
         doctor=doctor,
+        contract_harness=contract_harness,
     )
 
 
@@ -1879,6 +2224,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--doctor", action="store_true", help="Verify runtime layout, databases, and skill registration")
     parser.add_argument("--readiness", action="store_true", help="Run the real-Hermes readiness checklist against the selected runtime paths")
     parser.add_argument("--operator-workflow", action="store_true", help="Run the operator workflow plus council-backed project smoke test")
+    parser.add_argument("--contract-harness", action="store_true", help="Run the repo-local Hermes contract harness without requiring live Hermes")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
@@ -1951,9 +2297,23 @@ def main() -> int:
         print(f"checkpoint_backup={result.checkpoint_backup_path or 'none'}")
         print(f"legacy_db_files={','.join(result.legacy_database_files) if result.legacy_database_files else 'none'}")
         print(f"doctor_missing={','.join(result.doctor.missing_items) if result.doctor.missing_items else 'none'}")
+        print(f"contract_harness={'ok' if result.contract_harness.ok else 'failed'}")
+        print(f"contract_trace_id={result.contract_harness.trace_id or 'none'}")
         print(f"blocking={'; '.join(result.blocking_items) if result.blocking_items else 'none'}")
         print(f"drift={'; '.join(result.drift_items) if result.drift_items else 'none'}")
         print(f"tools={','.join(result.live_tools) if result.live_tools else 'none'}")
+        return 0 if result.ok else 1
+
+    if args.contract_harness:
+        result = exercise_hermes_contract(
+            config=config,
+            repo_root=args.repo_root,
+            tool_registry=runtime,
+        )
+        print("contract harness ok" if result.ok else "contract harness failed")
+        print(f"trace_id={result.trace_id or 'none'}")
+        print(f"blocked_pre_dispatch={'yes' if result.blocked_dispatch_pre_side_effect else 'no'}")
+        print(f"issues={'; '.join(result.issues) if result.issues else 'none'}")
         return 0 if result.ok else 1
 
     if args.operator_workflow:

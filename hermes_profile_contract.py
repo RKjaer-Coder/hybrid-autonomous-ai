@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST
+from skills.config import IntegrationConfig
+
+PROFILE_CONFIG_SKILL_KEY = "hybrid_autonomous_ai"
+DEFAULT_LOCAL_MODEL = "hybrid-autonomous-ai-local"
+DEFAULT_STRONG_MODEL = "hybrid-autonomous-ai-strong"
+DEFAULT_LOCAL_BASE_URL = f"http://127.0.0.1:{min(CONSTRUCTION_ALLOWLIST.permitted_ports)}/v1"
+
+EXPECTED_DANGEROUS_COMMAND_FAMILIES: dict[str, tuple[str, ...]] = {
+    "rm_rf": ("rm -rf", "rm\\s+(-[rrf]+\\s+)*[/~]"),
+    "chmod_777": ("chmod 777", "chmod\\s+[0-7]*777"),
+    "sudo_root": ("sudo", "su root", "su\\s+root", "doas"),
+    "disk_ops": ("mkfs", "fdisk", "dd if=", "of=/dev"),
+    "firewall_ops": ("iptables", "ufw", "firewall-cmd"),
+}
+
+
+def nested_get(payload: dict[str, Any], *keys: str) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return None
+        current = current[key]
+    return current
+
+
+def contains_subset(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return all(key in actual and contains_subset(actual[key], value) for key, value in expected.items())
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return False
+        return all(any(contains_subset(candidate, item) for candidate in actual) for item in expected)
+    return actual == expected
+
+
+@dataclass(frozen=True)
+class HermesProfileContract:
+    """Single source of truth for the repo-owned Hermes profile/config contract."""
+
+    config: IntegrationConfig
+    repo_root: str
+    approval_mode: str = "manual"
+
+    @property
+    def repo_root_path(self) -> Path:
+        return Path(self.repo_root).expanduser().resolve()
+
+    @property
+    def representative_dangerous_commands(self) -> list[str]:
+        return [variants[0] for variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.values()]
+
+    def runtime_mapping(self) -> dict[str, Any]:
+        return {
+            "repo_root": str(self.repo_root_path),
+            "data_dir": self.config.data_dir,
+            "skills_dir": self.config.skills_dir,
+            "checkpoints_dir": self.config.checkpoints_dir,
+            "alerts_dir": self.config.alerts_dir,
+            "logs_dir": str(Path(self.config.data_dir).expanduser().resolve().parent / "logs"),
+        }
+
+    def skill_config(self) -> dict[str, Any]:
+        return {
+            "profile_name": self.config.profile_name,
+            "repo_contract_version": 1,
+            "construction_phase": self.config.construction_phase,
+            "runtime": self.runtime_mapping(),
+            "routing": {
+                "local_endpoint": DEFAULT_LOCAL_BASE_URL,
+                "local_model": DEFAULT_LOCAL_MODEL,
+                "fallback_endpoint": DEFAULT_LOCAL_BASE_URL,
+                "strong_model_strategy": "frontier-if-configured-else-local",
+                "max_api_spend_usd": self.config.max_api_spend_usd,
+            },
+            "dangerous_command_families": {
+                name: list(variants)
+                for name, variants in EXPECTED_DANGEROUS_COMMAND_FAMILIES.items()
+            },
+        }
+
+    def config_document(self) -> dict[str, Any]:
+        return {
+            "model": {
+                "provider": "custom",
+                "default": DEFAULT_LOCAL_MODEL,
+                "base_url": DEFAULT_LOCAL_BASE_URL,
+                "api_key": "local-construction",
+            },
+            "fallback_model": {
+                "provider": "main",
+                "model": DEFAULT_STRONG_MODEL,
+            },
+            "approvals": {
+                "mode": self.approval_mode,
+            },
+            "terminal": {
+                "backend": "local",
+            },
+            "checkpoints": {
+                "enabled": True,
+                "max_snapshots": 20,
+            },
+            "dangerous_commands": self.representative_dangerous_commands,
+            "skills": {
+                "config": {
+                    PROFILE_CONFIG_SKILL_KEY: self.skill_config(),
+                }
+            },
+        }
+
+    def spec_profile_document(self) -> dict[str, Any]:
+        return {
+            "profile": self.config.profile_name,
+            "routing": {
+                "local_model": {
+                    "provider": "custom",
+                    "default": DEFAULT_LOCAL_MODEL,
+                    "base_url": DEFAULT_LOCAL_BASE_URL,
+                },
+                "strong_model": {
+                    "strategy": "frontier-if-configured-else-local",
+                    "fallback_model": {
+                        "provider": "main",
+                        "model": DEFAULT_STRONG_MODEL,
+                    },
+                },
+            },
+            "limits": {
+                "max_api_spend_usd": self.config.max_api_spend_usd,
+            },
+            "approvals": {
+                "mode": self.approval_mode,
+            },
+            "dangerous_commands": self.representative_dangerous_commands,
+            "runtime": self.runtime_mapping(),
+        }
+
+    def generated_checks(
+        self,
+        actual_config_doc: dict[str, Any] | None,
+        actual_spec_profile_doc: dict[str, Any] | None,
+    ) -> dict[str, bool]:
+        expected_config_doc = self.config_document()
+        expected_spec_profile_doc = self.spec_profile_document()
+        return {
+            "config_yaml_shape": actual_config_doc is not None and contains_subset(actual_config_doc, expected_config_doc),
+            "spec_profile_yaml_shape": actual_spec_profile_doc is not None
+            and contains_subset(actual_spec_profile_doc, expected_spec_profile_doc),
+            "profile_name": nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name")
+            == self.config.profile_name,
+            "local_model": nested_get(actual_config_doc or {}, "model", "provider") == "custom"
+            and nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
+            and nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
+            "fallback_model": nested_get(actual_config_doc or {}, "fallback_model", "provider") == "main"
+            and nested_get(actual_config_doc or {}, "fallback_model", "model") == DEFAULT_STRONG_MODEL,
+            "max_api_spend_zero": nested_get(
+                actual_config_doc or {},
+                "skills",
+                "config",
+                PROFILE_CONFIG_SKILL_KEY,
+                "routing",
+                "max_api_spend_usd",
+            )
+            == self.config.max_api_spend_usd,
+            "approvals_manual": nested_get(actual_config_doc or {}, "approvals", "mode") == self.approval_mode,
+            "dangerous_commands": contains_subset(
+                nested_get(actual_config_doc or {}, "dangerous_commands") or [],
+                self.representative_dangerous_commands,
+            ),
+            "runtime_paths": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
+                self.runtime_mapping(),
+            ),
+        }
+
+    def live_config_checks(self, actual_config_doc: dict[str, Any] | None) -> dict[str, bool]:
+        expected_config_doc = self.config_document()
+        return {
+            "config_probe_shape": actual_config_doc is not None and contains_subset(actual_config_doc, expected_config_doc),
+            "profile_name": nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name")
+            == self.config.profile_name,
+            "local_model": nested_get(actual_config_doc or {}, "model", "provider") == "custom"
+            and nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
+            and nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
+            "fallback_model": nested_get(actual_config_doc or {}, "fallback_model", "provider") == "main"
+            and nested_get(actual_config_doc or {}, "fallback_model", "model") == DEFAULT_STRONG_MODEL,
+            "max_api_spend_zero": nested_get(
+                actual_config_doc or {},
+                "skills",
+                "config",
+                PROFILE_CONFIG_SKILL_KEY,
+                "routing",
+                "max_api_spend_usd",
+            )
+            == self.config.max_api_spend_usd,
+            "approvals_manual": nested_get(actual_config_doc or {}, "approvals", "mode") == self.approval_mode,
+            "dangerous_commands": contains_subset(
+                nested_get(actual_config_doc or {}, "dangerous_commands") or [],
+                self.representative_dangerous_commands,
+            ),
+            "runtime_paths": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "runtime") or {},
+                self.runtime_mapping(),
+            ),
+        }

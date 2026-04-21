@@ -4,6 +4,7 @@ import datetime
 import json
 from typing import Optional
 
+from harness_variants import HarnessVariantManager
 from immune.judge_lifecycle import JudgeLifecycleManager
 from immune.config import load_config
 from runtime_control import RuntimeControlManager
@@ -26,6 +27,10 @@ class ObservabilitySkill:
         operator = self._db.get_connection("operator_digest")
         self._runtime_control = RuntimeControlManager(
             operator.execute("PRAGMA database_list").fetchone()[2]
+        )
+        telemetry = self._db.get_connection("telemetry")
+        self._harness_variants = HarnessVariantManager(
+            telemetry.execute("PRAGMA database_list").fetchone()[2]
         )
 
     def query_immune_verdicts(
@@ -250,6 +255,37 @@ class ObservabilitySkill:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def execution_traces(
+        self,
+        limit: int = 20,
+        skill_name: str | None = None,
+        training_eligible: bool | None = None,
+        judge_verdict: str | None = None,
+    ) -> list[dict]:
+        return self._harness_variants.list_execution_traces(
+            limit=limit,
+            skill_name=skill_name,
+            training_eligible=training_eligible,
+            judge_verdict=judge_verdict,
+        )
+
+    def harness_variants(
+        self,
+        limit: int = 20,
+        skill_name: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        return self._harness_variants.list_variants(limit=limit, skill_name=skill_name, status=status)
+
+    def harness_frontier(self, limit: int = 20, skill_name: str | None = None) -> list[dict]:
+        return self._harness_variants.frontier(limit=limit, skill_name=skill_name)
+
+    def harness_variant_summary(self) -> dict:
+        return {
+            "execution_traces": self._harness_variants.execution_trace_summary(),
+            "variants": self._harness_variants.summary(),
+        }
+
     def reliability_dashboard(self, limit: int = 20) -> dict:
         telemetry = self._db.get_connection("telemetry")
         reliability_rows = telemetry.execute(
@@ -431,6 +467,7 @@ class ObservabilitySkill:
                 "recent_halts": self.runtime_halt_events(limit=3),
                 "recent_restarts": self.runtime_restart_history(limit=3),
             },
+            "harness_variants": self.harness_variant_summary(),
             "research_health": {
                 "pending_tasks": strategic.execute(
                     "SELECT COUNT(*) FROM research_tasks WHERE status = 'PENDING'"
@@ -597,6 +634,26 @@ def observability_entry(action: str, **kwargs):
             kwargs.get("limit", 10),
             kwargs.get("status"),
         )
+    if action == "execution_traces":
+        return _SKILL.execution_traces(
+            kwargs.get("limit", 20),
+            kwargs.get("skill_name"),
+            kwargs.get("training_eligible"),
+            kwargs.get("judge_verdict"),
+        )
+    if action == "harness_variants":
+        return _SKILL.harness_variants(
+            kwargs.get("limit", 20),
+            kwargs.get("skill_name"),
+            kwargs.get("status"),
+        )
+    if action == "harness_frontier":
+        return _SKILL.harness_frontier(
+            kwargs.get("limit", 20),
+            kwargs.get("skill_name"),
+        )
+    if action == "harness_variant_summary":
+        return _SKILL.harness_variant_summary()
     if action == "recent_digests":
         return _SKILL.recent_digests(kwargs.get("limit", 5), kwargs.get("digest_type"))
     if action == "reliability_dashboard":

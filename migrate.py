@@ -34,10 +34,13 @@ EXPECTED_OBJECTS = {
         },
     },
     "telemetry": {
-        "tables": {"step_outcomes", "chain_definitions"},
+        "tables": {"step_outcomes", "chain_definitions", "execution_traces", "harness_variants"},
         "indexes": {
             "idx_step_outcomes_step_skill_timestamp", "idx_step_outcomes_chain_id",
             "idx_step_outcomes_outcome_timestamp", "idx_step_outcomes_skill_timestamp",
+            "idx_execution_traces_skill_created", "idx_execution_traces_training_created",
+            "idx_execution_traces_retention_created", "idx_hv_skill_status",
+            "idx_hv_created", "idx_hv_active_skill",
         },
     },
     "immune_system": {

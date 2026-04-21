@@ -6,6 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from harness_variants import HarnessVariantManager, VariantEvalResult
 from financial_router.types import JWTClaims
 from immune.config import load_config
 from immune.judge_lifecycle import JudgeLifecycleManager
@@ -74,6 +75,10 @@ class OperatorInterfaceSkill:
         operator = self._db.get_connection("operator_digest")
         self._runtime_control = RuntimeControlManager(
             operator.execute("PRAGMA database_list").fetchone()[2]
+        )
+        telemetry = self._db.get_connection("telemetry")
+        self._harness_variants = HarnessVariantManager(
+            telemetry.execute("PRAGMA database_list").fetchone()[2]
         )
 
     def alert(
@@ -478,6 +483,157 @@ class OperatorInterfaceSkill:
             "runtime_status": self._runtime_control.status(reference_time=now),
         }
 
+    def list_execution_traces(
+        self,
+        *,
+        limit: int = 20,
+        skill_name: str | None = None,
+        training_eligible: bool | None = None,
+        judge_verdict: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._harness_variants.list_execution_traces(
+            limit=limit,
+            skill_name=skill_name,
+            training_eligible=training_eligible,
+            judge_verdict=judge_verdict,
+        )
+
+    def list_harness_variants(
+        self,
+        *,
+        limit: int = 20,
+        skill_name: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._harness_variants.list_variants(limit=limit, skill_name=skill_name, status=status)
+
+    def harness_frontier(self, *, limit: int = 20, skill_name: str | None = None) -> list[dict[str, Any]]:
+        return self._harness_variants.frontier(limit=limit, skill_name=skill_name)
+
+    def propose_harness_variant(
+        self,
+        *,
+        skill_name: str,
+        parent_version: str,
+        diff: str,
+        source: str = "operator",
+        prompt_prelude: str = "",
+        retrieval_strategy_diff: str = "",
+        scoring_formula_diff: str = "",
+        context_assembly_diff: str = "",
+        touches_infrastructure: bool = False,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.propose_variant(
+            skill_name=skill_name,
+            parent_version=parent_version,
+            diff=diff,
+            source=source,
+            prompt_prelude=prompt_prelude,
+            retrieval_strategy_diff=retrieval_strategy_diff,
+            scoring_formula_diff=scoring_formula_diff,
+            context_assembly_diff=context_assembly_diff,
+            touches_infrastructure=touches_infrastructure,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def start_harness_variant_shadow_eval(
+        self,
+        *,
+        variant_id: str,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.start_shadow_eval(variant_id, reference_time=now)
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def record_harness_variant_eval(
+        self,
+        *,
+        variant_id: str,
+        benchmark_name: str,
+        baseline_outcome_scores: list[float],
+        variant_outcome_scores: list[float],
+        regression_rate: float,
+        gate_0_pass: bool,
+        known_bad_block_rate: float,
+        gate_1_pass: bool,
+        baseline_mean_score: float,
+        variant_mean_score: float,
+        quality_delta: float,
+        gate_2_pass: bool,
+        baseline_std: float,
+        variant_std: float,
+        gate_3_pass: bool,
+        regressed_trace_count: int,
+        improved_trace_count: int,
+        net_trace_gain: int,
+        traces_evaluated: int,
+        compute_cost_cu: float,
+        eval_duration_ms: int,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        variants = self._harness_variants.list_variants(limit=1, status=None)
+        matching = next((row for row in variants if row["variant_id"] == variant_id), None)
+        if matching is None:
+            matching = next(
+                (row for row in self._harness_variants.list_variants(limit=100) if row["variant_id"] == variant_id),
+                None,
+            )
+        if matching is None:
+            raise KeyError(variant_id)
+        result = self._harness_variants.record_eval_result(
+            variant_id,
+            VariantEvalResult(
+                variant_id=variant_id,
+                skill_name=matching["skill_name"],
+                benchmark_name=benchmark_name,
+                baseline_outcome_scores=baseline_outcome_scores,
+                variant_outcome_scores=variant_outcome_scores,
+                regression_rate=regression_rate,
+                gate_0_pass=gate_0_pass,
+                known_bad_block_rate=known_bad_block_rate,
+                gate_1_pass=gate_1_pass,
+                baseline_mean_score=baseline_mean_score,
+                variant_mean_score=variant_mean_score,
+                quality_delta=quality_delta,
+                gate_2_pass=gate_2_pass,
+                baseline_std=baseline_std,
+                variant_std=variant_std,
+                gate_3_pass=gate_3_pass,
+                regressed_trace_count=regressed_trace_count,
+                improved_trace_count=improved_trace_count,
+                net_trace_gain=net_trace_gain,
+                traces_evaluated=traces_evaluated,
+                compute_cost_cu=compute_cost_cu,
+                eval_duration_ms=eval_duration_ms,
+                created_at=now,
+            ),
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
     def record_heartbeat(self, interaction_type: str, channel: str = "CLI") -> str:
         entry_id = str(uuid.uuid4())
         now = self._utc_now()
@@ -742,6 +898,8 @@ class OperatorInterfaceSkill:
                 or health["judge_deadlock"]["mode"] in {"FALLBACK", "HALTED"}
                 or health["judge_deadlock"]["review_queue"]["pending"]
                 or health["judge_deadlock"]["review_queue"]["blocked"]
+                or health["harness_variants"]["variants"]["active_count"]
+                or health["harness_variants"]["variants"]["rejected_24h"]
             ) and "SYSTEM HEALTH" not in selected_names:
                 selected_names.insert(1, "SYSTEM HEALTH")
             sections = {name: sections[name] for name in selected_names}
@@ -868,6 +1026,16 @@ class OperatorInterfaceSkill:
             issues.append(f"judge_review pending={health['judge_deadlock']['review_queue']['pending']}")
         if health["judge_deadlock"]["review_queue"]["blocked"]:
             issues.append(f"judge_review blocked={health['judge_deadlock']['review_queue']['blocked']}")
+        if health["harness_variants"]["variants"]["active_count"]:
+            issues.append(f"variants active={health['harness_variants']['variants']['active_count']}")
+        if health["harness_variants"]["variants"]["rejected_24h"]:
+            issues.append(f"variants rejected24h={health['harness_variants']['variants']['rejected_24h']}")
+        if health["harness_variants"]["execution_traces"]["total_count"]:
+            issues.append(
+                "traces="
+                + f"{health['harness_variants']['execution_traces']['total_count']}"
+                + f"/eligible:{health['harness_variants']['execution_traces']['training_eligible_count']}"
+            )
         if health["unacknowledged_t3_alerts"]:
             issues.append(f"T3 pending ack={health['unacknowledged_t3_alerts']}")
         if health["research_health"]["stale_tasks"] or health["research_health"]["failed_tasks"]:
@@ -986,6 +1154,10 @@ class OperatorInterfaceSkill:
         blocked_restart_attempts = len(
             self._runtime_control.list_restart_history(limit=5, status="BLOCKED")
         )
+        harness_variant_summary = {
+            "execution_traces": self._harness_variants.execution_trace_summary(),
+            "variants": self._harness_variants.summary(),
+        }
         stale_tasks = strategic.execute(
             "SELECT COUNT(*) FROM research_tasks WHERE status = 'STALE'"
         ).fetchone()[0]
@@ -1029,6 +1201,7 @@ class OperatorInterfaceSkill:
                 **runtime_status,
                 "blocked_restart_attempts": blocked_restart_attempts,
             },
+            "harness_variants": harness_variant_summary,
             "unacknowledged_t3_alerts": unacknowledged_t3,
             "research_health": {
                 "stale_tasks": stale_tasks,
@@ -1404,6 +1577,67 @@ def operator_interface_entry(action: str, **kwargs):
             judge_event_id=kwargs.get("judge_event_id"),
             restart_reason=kwargs.get("restart_reason", "operator_runtime_restart"),
             notes=kwargs.get("notes"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "list_execution_traces":
+        return _SKILL.list_execution_traces(
+            limit=kwargs.get("limit", 20),
+            skill_name=kwargs.get("skill_name"),
+            training_eligible=kwargs.get("training_eligible"),
+            judge_verdict=kwargs.get("judge_verdict"),
+        )
+    if action == "list_harness_variants":
+        return _SKILL.list_harness_variants(
+            limit=kwargs.get("limit", 20),
+            skill_name=kwargs.get("skill_name"),
+            status=kwargs.get("status"),
+        )
+    if action == "harness_frontier":
+        return _SKILL.harness_frontier(
+            limit=kwargs.get("limit", 20),
+            skill_name=kwargs.get("skill_name"),
+        )
+    if action == "propose_harness_variant":
+        return _SKILL.propose_harness_variant(
+            skill_name=kwargs["skill_name"],
+            parent_version=kwargs["parent_version"],
+            diff=kwargs["diff"],
+            source=kwargs.get("source", "operator"),
+            prompt_prelude=kwargs.get("prompt_prelude", ""),
+            retrieval_strategy_diff=kwargs.get("retrieval_strategy_diff", ""),
+            scoring_formula_diff=kwargs.get("scoring_formula_diff", ""),
+            context_assembly_diff=kwargs.get("context_assembly_diff", ""),
+            touches_infrastructure=kwargs.get("touches_infrastructure", False),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "start_harness_variant_shadow_eval":
+        return _SKILL.start_harness_variant_shadow_eval(
+            variant_id=kwargs["variant_id"],
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "record_harness_variant_eval":
+        return _SKILL.record_harness_variant_eval(
+            variant_id=kwargs["variant_id"],
+            benchmark_name=kwargs["benchmark_name"],
+            baseline_outcome_scores=kwargs["baseline_outcome_scores"],
+            variant_outcome_scores=kwargs["variant_outcome_scores"],
+            regression_rate=kwargs["regression_rate"],
+            gate_0_pass=kwargs["gate_0_pass"],
+            known_bad_block_rate=kwargs["known_bad_block_rate"],
+            gate_1_pass=kwargs["gate_1_pass"],
+            baseline_mean_score=kwargs["baseline_mean_score"],
+            variant_mean_score=kwargs["variant_mean_score"],
+            quality_delta=kwargs["quality_delta"],
+            gate_2_pass=kwargs["gate_2_pass"],
+            baseline_std=kwargs["baseline_std"],
+            variant_std=kwargs["variant_std"],
+            gate_3_pass=kwargs["gate_3_pass"],
+            regressed_trace_count=kwargs["regressed_trace_count"],
+            improved_trace_count=kwargs["improved_trace_count"],
+            net_trace_gain=kwargs["net_trace_gain"],
+            traces_evaluated=kwargs["traces_evaluated"],
+            compute_cost_cu=kwargs["compute_cost_cu"],
+            eval_duration_ms=kwargs["eval_duration_ms"],
             reference_time=kwargs.get("reference_time"),
         )
     if action == "generate_digest":

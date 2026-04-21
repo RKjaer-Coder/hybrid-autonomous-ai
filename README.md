@@ -112,10 +112,10 @@ The highest-priority remaining step is still hardware-gated: run the readiness
 flow against a real Hermes installation on the Mac Studio and confirm the live
 CLI/profile surface end to end.
 
-The highest-priority remaining non-hardware governance work is now tightening
-the remaining drift between these repo-local governance/runtime contracts and
-the behavior of a live Hermes-triggered gate, dispatch, halt, and restart
-flow.
+The highest-priority remaining non-hardware work is now the next Stage 3
+substrate on top of this runtime baseline: extend the new telemetry-backed
+execution-trace and harness-variant foundation into broader replay/eval flow
+instead of keeping §8.3b in planning-only form.
 
 ## What Is In This Repo
 
@@ -132,9 +132,15 @@ Today, this repository includes:
 - a Hermes runtime integration layer that can prepare a local profile bundle,
   generate repo-owned Hermes profile artifacts, migrate the databases,
   bootstrap a runtime, run a doctor check that validates the runtime layout
-  and generated profile files, run a real-Hermes readiness check against the
-  operator bootstrap checklist, and prove a deterministic operator workflow
-  plus a council-backed opportunity and phase-gate path against a mock runtime
+  and generated profile files, run a repo-local Hermes contract harness that
+  exercises approval, dispatch, deadlock halt, blocked execution, and audited
+  restart against the mock/runtime substrate, run a real-Hermes readiness
+  check against the operator bootstrap checklist, and prove a deterministic
+  operator workflow plus a council-backed opportunity and phase-gate path
+  against a mock runtime
+- an initial §8.3b telemetry substrate with persisted `execution_traces`,
+  `harness_variants`, promoted frontier views, and operator/observability
+  lifecycle surfaces
 - GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
   pull requests to `main`
 
@@ -170,7 +176,8 @@ substrate with deterministic runtime proofs.
 Runtime state is intentionally split across five SQLite databases:
 
 - `strategic_memory.db`: briefs, research tasks, opportunities, council outputs
-- `telemetry.db`: chain definitions, step outcomes, reliability views
+- `telemetry.db`: chain definitions, step outcomes, execution traces,
+  harness variants, frontier view, and reliability views
 - `immune_system.db`: verdicts, alerts, revocations, security audit trails
 - `financial_ledger.db`: routing decisions, costs, revenue, projects, kill data
 - `operator_digest.db`: digests, alerts, gates, harvest requests, operator load
@@ -223,6 +230,12 @@ Run the deterministic runtime proof:
 python3 -m skills.runtime --operator-workflow
 ```
 
+Run the repo-local Hermes contract harness:
+
+```bash
+python3 -m skills.runtime --contract-harness
+```
+
 Run the explicit runtime bootstrap path:
 
 ```bash
@@ -266,6 +279,12 @@ they do not clearly document a first-class `dangerous_commands` config schema,
 so the repo continues to project and validate the §7.5c dangerous-command set
 as a repo-owned contract until live Hermes proves the exact upstream key
 shape.
+
+The readiness command now also runs the repo-local Hermes contract harness
+first, so readiness failures distinguish between:
+
+- repo-local contract breaks in the generated profile/gate/halt/restart path
+- live Hermes CLI/profile drift on top of an otherwise healthy local contract
 
 On machines without Hermes installed yet, you can still verify the offline
 attachment path without attempting the live chat smoke test:
