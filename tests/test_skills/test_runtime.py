@@ -510,6 +510,13 @@ def test_run_operator_workflow_installs_profile_before_final_doctor(tmp_path):
     assert any(item["step_type"] == "phase_gate_apply" for item in result.observability.telemetry_events)
     assert result.observability.system_health["heartbeat_state"] == "ACTIVE"
     assert result.observability.system_health["pending_harvests"] == 1
+    assert result.trace_id is not None
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        trace_row = conn.execute(
+            "SELECT role, judge_verdict, retention_class FROM execution_traces WHERE trace_id = ?",
+            (result.trace_id,),
+        ).fetchone()
+    assert trace_row == ("operator_workflow", "PASS", "STANDARD")
 
 
 def test_run_operator_workflow_fails_closed_when_runtime_is_halted(tmp_path):
@@ -531,6 +538,13 @@ def test_run_operator_workflow_fails_closed_when_runtime_is_halted(tmp_path):
     assert result.ok is False
     assert result.error is not None
     assert "runtime halted before workflow execution" in result.error
+    assert result.trace_id is not None
+    with sqlite3.connect(tmp_path / "data" / "telemetry.db") as conn:
+        trace_row = conn.execute(
+            "SELECT role, judge_verdict, retention_class FROM execution_traces WHERE trace_id = ?",
+            (result.trace_id,),
+        ).fetchone()
+    assert trace_row == ("operator_workflow", "FAIL", "FAILURE_AUDIT")
 
 
 def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypatch, capsys):

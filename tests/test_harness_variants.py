@@ -175,3 +175,101 @@ def test_harness_variant_lifecycle_and_frontier(tmp_path):
     assert summary["active_count"] == 0
     assert summary["promoted_count"] == 1
     assert summary["rejected_24h"] == 3
+
+
+def test_harness_variant_replay_eval_uses_execution_traces(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+
+    for idx, score in enumerate((0.72, 0.75, 0.78), start=1):
+        manager.log_execution_trace(
+            ExecutionTrace(
+                trace_id=f"baseline-{idx}",
+                task_id=f"task-{idx}",
+                role="runtime",
+                skill_name="research_domain",
+                harness_version="baseline-v1",
+                intent_goal="baseline replay set",
+                steps=[
+                    ExecutionTraceStep(
+                        step_index=1,
+                        tool_call="research.run",
+                        tool_result='{"ok":true}',
+                        tool_result_file=None,
+                        tokens_in=120,
+                        tokens_out=80,
+                        latency_ms=12,
+                        model_used="local-default",
+                    )
+                ],
+                prompt_template="baseline prompt",
+                context_assembled="context " * 40,
+                retrieval_queries=["market signal", "customer signal"],
+                judge_verdict="PASS",
+                judge_reasoning="good",
+                outcome_score=score,
+                cost_usd=0.0,
+                duration_ms=25,
+                training_eligible=True,
+                retention_class="STANDARD",
+                source_chain_id=f"chain-{idx}",
+                source_session_id=f"session-{idx}",
+                source_trace_id=None,
+                created_at=f"2026-04-21T12:0{idx}:00+00:00",
+            )
+        )
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="known-bad-1",
+            task_id="task-bad-1",
+            role="runtime",
+            skill_name="research_domain",
+            harness_version="baseline-v1",
+            intent_goal="known bad replay set",
+            steps=[],
+            prompt_template="baseline prompt",
+            context_assembled="context " * 10,
+            retrieval_queries=["unsafe expansion"],
+            judge_verdict="FAIL",
+            judge_reasoning="known bad",
+            outcome_score=0.1,
+            cost_usd=0.0,
+            duration_ms=12,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id="chain-bad-1",
+            source_session_id="session-bad-1",
+            source_trace_id=None,
+            created_at="2026-04-21T12:09:00+00:00",
+        )
+    )
+
+    proposed = manager.propose_variant(
+        skill_name="research_domain",
+        parent_version="baseline-v1",
+        diff="@@ -1 +1 @@\n-old\n+new retrieval calibration\n",
+        source="operator",
+        prompt_prelude="Tighten evidence grounding and clarify the final answer rubric.",
+        retrieval_strategy_diff="Use multi-query retrieval and rerank the strongest evidence first.",
+        scoring_formula_diff="Calibrate thresholds and reward grounded evidence.",
+        context_assembly_diff="Compress context and prioritize the most relevant snippets.",
+        reference_time="2026-04-21T12:10:00+00:00",
+    )
+
+    replayed = manager.evaluate_variant_from_traces(
+        proposed["variant_id"],
+        sample_size=10,
+        minimum_trace_count=3,
+        minimum_known_bad_traces=1,
+        reference_time="2026-04-21T12:11:00+00:00",
+    )
+
+    assert replayed["status"] == "PROMOTED"
+    assert replayed["eval_result"] is not None
+    assert replayed["eval_result"]["traces_evaluated"] == 3
+    assert replayed["eval_result"]["known_bad_block_rate"] == 1.0
+    assert replayed["eval_result"]["quality_delta"] > 0.0
+    replay_traces = manager.list_execution_traces(limit=20, skill_name="research_domain")
+    replay_artifacts = [row for row in replay_traces if row["source_trace_id"] is not None]
+    assert len(replay_artifacts) == 4
+    assert all(row["harness_version"] == proposed["variant_id"] for row in replay_artifacts)

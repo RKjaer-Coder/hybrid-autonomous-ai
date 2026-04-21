@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import sqlite3
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -11,6 +13,53 @@ from typing import Any
 _REQUIRED_TABLES = {
     "execution_traces",
     "harness_variants",
+}
+
+_POSITIVE_VARIANT_CUES = {
+    "tighten": 0.012,
+    "clarify": 0.01,
+    "focus": 0.012,
+    "ground": 0.01,
+    "rank": 0.008,
+    "normalize": 0.01,
+    "calibrate": 0.014,
+    "rubric": 0.01,
+}
+_RETRIEVAL_VARIANT_CUES = {
+    "retrieval": 0.014,
+    "retrieve": 0.012,
+    "rerank": 0.014,
+    "multi": 0.01,
+    "divers": 0.012,
+    "dedupe": 0.008,
+}
+_CONTEXT_VARIANT_CUES = {
+    "context": 0.008,
+    "compress": 0.014,
+    "summar": 0.012,
+    "priorit": 0.012,
+    "trim": 0.01,
+    "budget": 0.008,
+}
+_SCORING_VARIANT_CUES = {
+    "score": 0.014,
+    "threshold": 0.012,
+    "penal": 0.01,
+    "reward": 0.008,
+    "confidence": 0.008,
+    "variance": 0.01,
+}
+_RISK_VARIANT_CUES = {
+    "disable": 0.05,
+    "bypass": 0.08,
+    "skip": 0.06,
+    "ignore": 0.06,
+    "unsafe": 0.08,
+    "raw": 0.03,
+    "unfilter": 0.05,
+    "shell": 0.04,
+    "network": 0.03,
+    "sudo": 0.1,
 }
 
 
@@ -27,6 +76,24 @@ def _to_iso(value: datetime.datetime) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _population_std(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    average = _mean(values)
+    variance = sum((value - average) ** 2 for value in values) / len(values)
+    return math.sqrt(variance)
 
 
 @dataclass(frozen=True)
@@ -136,6 +203,18 @@ class HarnessVariantManager:
     @property
     def available(self) -> bool:
         return self._available
+
+    def get_variant(self, variant_id: str) -> dict[str, Any]:
+        if not self._available:
+            raise RuntimeError("Harness variant tables are not available")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM harness_variants WHERE variant_id = ? LIMIT 1",
+                (variant_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(variant_id)
+        return self._variant_row_to_dict(row)
 
     def log_execution_trace(self, trace: ExecutionTrace) -> dict[str, Any]:
         if not self._available:
@@ -389,6 +468,132 @@ class HarnessVariantManager:
         assert updated is not None
         return self._variant_row_to_dict(updated)
 
+    def evaluate_variant_from_traces(
+        self,
+        variant_id: str,
+        *,
+        benchmark_name: str | None = None,
+        sample_size: int = 50,
+        minimum_trace_count: int = 3,
+        minimum_known_bad_traces: int = 1,
+        known_bad_score_threshold: float = 0.35,
+        per_trace_cost_cu: float = 0.05,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._available:
+            raise RuntimeError("Harness variant tables are not available")
+        if sample_size <= 0:
+            raise ValueError("sample_size must be positive")
+        if minimum_trace_count <= 0:
+            raise ValueError("minimum_trace_count must be positive")
+        if minimum_known_bad_traces < 0:
+            raise ValueError("minimum_known_bad_traces must be non-negative")
+
+        now = self._now(reference_time)
+        variant = self.get_variant(variant_id)
+        if variant["status"] == "PROPOSED":
+            variant = self.start_shadow_eval(variant_id, reference_time=now)
+        elif variant["status"] != "SHADOW_EVAL":
+            raise ValueError(f"Variant {variant_id} is not eligible for shadow replay: {variant['status']}")
+
+        start = time.perf_counter()
+        baseline_rows = self._select_replay_traces(
+            skill_name=variant["skill_name"],
+            limit=sample_size,
+            reference_time=now,
+            known_bad=False,
+        )
+        known_bad_rows = self._select_replay_traces(
+            skill_name=variant["skill_name"],
+            limit=sample_size,
+            reference_time=now,
+            known_bad=True,
+        )
+        profile = self._variant_replay_profile(variant)
+
+        baseline_scores = [float(row["outcome_score"]) for row in baseline_rows]
+        variant_scores: list[float] = []
+        regressed = 0
+        improved = 0
+        for row in baseline_rows:
+            replay = self._replay_variant_score(row, profile)
+            variant_scores.append(replay["score"])
+            if replay["score"] + 0.005 < float(row["outcome_score"]):
+                regressed += 1
+            elif replay["score"] > float(row["outcome_score"]) + 0.005:
+                improved += 1
+            self._log_replay_trace(
+                variant=variant,
+                source_trace=row,
+                replay_score=replay["score"],
+                known_bad=False,
+                blocked=None,
+                profile=profile,
+                reference_time=now,
+            )
+
+        blocked_count = 0
+        for row in known_bad_rows:
+            replay = self._replay_variant_score(row, profile)
+            blocked = replay["score"] <= known_bad_score_threshold
+            if blocked:
+                blocked_count += 1
+            self._log_replay_trace(
+                variant=variant,
+                source_trace=row,
+                replay_score=replay["score"],
+                known_bad=True,
+                blocked=blocked,
+                profile=profile,
+                reference_time=now,
+            )
+
+        traces_evaluated = len(baseline_scores)
+        regression_rate = regressed / traces_evaluated if traces_evaluated else 1.0
+        baseline_mean = _mean(baseline_scores)
+        variant_mean = _mean(variant_scores)
+        quality_delta = variant_mean - baseline_mean
+        baseline_std = _population_std(baseline_scores)
+        variant_std = _population_std(variant_scores)
+        known_bad_count = len(known_bad_rows)
+        known_bad_block_rate = blocked_count / known_bad_count if known_bad_count else 0.0
+        gate_0_pass = traces_evaluated >= minimum_trace_count and regression_rate <= 0.03
+        gate_1_pass = (
+            known_bad_count >= minimum_known_bad_traces and known_bad_block_rate >= 1.0
+        )
+        gate_2_pass = traces_evaluated >= minimum_trace_count and quality_delta > 0.0
+        gate_3_pass = traces_evaluated >= minimum_trace_count and (
+            variant_std <= baseline_std + max(0.01, baseline_std)
+        )
+        eval_duration_ms = max(1, int((time.perf_counter() - start) * 1000))
+
+        result = VariantEvalResult(
+            variant_id=variant_id,
+            skill_name=variant["skill_name"],
+            benchmark_name=benchmark_name or f"shadow_replay_{variant['skill_name']}",
+            baseline_outcome_scores=baseline_scores,
+            variant_outcome_scores=variant_scores,
+            regression_rate=regression_rate,
+            gate_0_pass=gate_0_pass,
+            known_bad_block_rate=known_bad_block_rate,
+            gate_1_pass=gate_1_pass,
+            baseline_mean_score=baseline_mean,
+            variant_mean_score=variant_mean,
+            quality_delta=quality_delta,
+            gate_2_pass=gate_2_pass,
+            baseline_std=baseline_std,
+            variant_std=variant_std,
+            gate_3_pass=gate_3_pass,
+            regressed_trace_count=regressed,
+            improved_trace_count=improved,
+            net_trace_gain=improved - regressed,
+            traces_evaluated=traces_evaluated,
+            compute_cost_cu=round((traces_evaluated + known_bad_count) * per_trace_cost_cu, 6),
+            eval_duration_ms=eval_duration_ms,
+            created_at=now,
+        )
+        return self.record_eval_result(variant_id, result, reference_time=now)
+
     def list_variants(
         self,
         *,
@@ -504,6 +709,156 @@ class HarnessVariantManager:
                 (skill_name, cutoff),
             ).fetchone()
         return row is not None
+
+    def _select_replay_traces(
+        self,
+        *,
+        skill_name: str,
+        limit: int,
+        reference_time: str,
+        known_bad: bool,
+    ) -> list[dict[str, Any]]:
+        if known_bad:
+            where_sql = (
+                "skill_name = ? AND source_trace_id IS NULL AND created_at <= ? "
+                "AND (training_eligible = 0 OR judge_verdict != 'PASS' OR retention_class = 'FAILURE_AUDIT')"
+            )
+        else:
+            where_sql = (
+                "skill_name = ? AND training_eligible = 1 AND judge_verdict = 'PASS' "
+                "AND source_trace_id IS NULL AND created_at <= ?"
+            )
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM execution_traces
+                WHERE {where_sql}
+                ORDER BY created_at DESC, trace_id DESC
+                LIMIT ?
+                """,
+                (skill_name, reference_time, limit),
+            ).fetchall()
+        return [self._trace_row_to_dict(row) for row in rows]
+
+    def _variant_replay_profile(self, variant: dict[str, Any]) -> dict[str, float]:
+        combined = " ".join(
+            (
+                variant["diff"],
+                variant["prompt_prelude"],
+                variant["retrieval_strategy_diff"],
+                variant["scoring_formula_diff"],
+                variant["context_assembly_diff"],
+            )
+        ).lower()
+        return {
+            "general_boost": min(0.08, self._cue_weight(combined, _POSITIVE_VARIANT_CUES)),
+            "retrieval_boost": min(0.08, self._cue_weight(combined, _RETRIEVAL_VARIANT_CUES)),
+            "context_boost": min(0.08, self._cue_weight(combined, _CONTEXT_VARIANT_CUES)),
+            "scoring_boost": min(0.08, self._cue_weight(combined, _SCORING_VARIANT_CUES)),
+            "risk_penalty": min(0.25, self._cue_weight(combined, _RISK_VARIANT_CUES)),
+        }
+
+    def _replay_variant_score(
+        self,
+        trace: dict[str, Any],
+        profile: dict[str, float],
+    ) -> dict[str, float]:
+        baseline = float(trace["outcome_score"])
+        query_factor = min(1.0, len(trace["retrieval_queries"]) / 3.0)
+        context_factor = min(1.0, len(trace["context_assembled"]) / 600.0)
+        step_factor = min(1.0, len(trace["steps"]) / 8.0)
+        quality_headroom = max(0.0, 1.0 - baseline)
+        calibration_zone = 1.0 - min(1.0, abs(0.7 - baseline) / 0.7)
+
+        delta = 0.0
+        delta += profile["general_boost"] * (0.35 + quality_headroom * 0.65)
+        delta += profile["retrieval_boost"] * (0.2 + query_factor * 0.8)
+        delta += profile["context_boost"] * (0.2 + context_factor * 0.8)
+        delta += profile["scoring_boost"] * (0.3 + calibration_zone * 0.7)
+        delta -= profile["risk_penalty"] * (0.45 + step_factor * 0.25 + query_factor * 0.15)
+
+        if trace["judge_verdict"] != "PASS" or trace["retention_class"] == "FAILURE_AUDIT":
+            delta -= profile["risk_penalty"] * 0.35
+
+        return {
+            "score": _clamp(baseline + delta),
+            "delta": delta,
+        }
+
+    def _log_replay_trace(
+        self,
+        *,
+        variant: dict[str, Any],
+        source_trace: dict[str, Any],
+        replay_score: float,
+        known_bad: bool,
+        blocked: bool | None,
+        profile: dict[str, float],
+        reference_time: str,
+    ) -> None:
+        if source_trace["source_trace_id"] is not None:
+            return
+        reason = (
+            "Known-bad replay remained blocked."
+            if blocked is True
+            else "Known-bad replay escaped expected block threshold."
+            if blocked is False
+            else "Shadow replay completed."
+        )
+        judge_verdict = (
+            "PASS" if blocked is not False else "FAIL"
+        ) if known_bad else ("PASS" if replay_score >= source_trace["outcome_score"] else "FAIL")
+        retention_class = "FAILURE_AUDIT" if judge_verdict == "FAIL" else "STANDARD"
+        training_eligible = False
+        step_payload = {
+            "source_trace_id": source_trace["trace_id"],
+            "variant_id": variant["variant_id"],
+            "replay_score": round(replay_score, 6),
+            "baseline_score": round(float(source_trace["outcome_score"]), 6),
+            "known_bad": known_bad,
+            "blocked": blocked,
+            "profile": {key: round(value, 6) for key, value in profile.items()},
+        }
+        replay_trace = ExecutionTrace(
+            trace_id=str(uuid.uuid4()),
+            task_id=f"shadow-eval-{variant['variant_id']}",
+            role="harness_shadow_eval_known_bad" if known_bad else "harness_shadow_eval",
+            skill_name=variant["skill_name"],
+            harness_version=variant["variant_id"],
+            intent_goal=f"Replay variant {variant['variant_id']} against archived execution evidence.",
+            steps=[
+                ExecutionTraceStep(
+                    step_index=1,
+                    tool_call="harness_variants.shadow_replay",
+                    tool_result=_json(step_payload),
+                    tool_result_file=None,
+                    tokens_in=0,
+                    tokens_out=0,
+                    latency_ms=0,
+                    model_used="shadow-replay",
+                )
+            ],
+            prompt_template=variant["prompt_prelude"] or variant["diff"],
+            context_assembled=source_trace["context_assembled"],
+            retrieval_queries=source_trace["retrieval_queries"],
+            judge_verdict=judge_verdict,
+            judge_reasoning=reason,
+            outcome_score=replay_score,
+            cost_usd=0.0,
+            duration_ms=0,
+            training_eligible=training_eligible,
+            retention_class=retention_class,
+            source_chain_id=source_trace["source_chain_id"],
+            source_session_id=source_trace["source_session_id"],
+            source_trace_id=source_trace["trace_id"],
+            created_at=reference_time,
+        )
+        self.log_execution_trace(replay_trace)
+
+    @staticmethod
+    def _cue_weight(text: str, cues: dict[str, float]) -> float:
+        return sum(weight for cue, weight in cues.items() if cue in text)
 
     def _trace_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         return {

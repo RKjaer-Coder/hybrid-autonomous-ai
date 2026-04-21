@@ -112,10 +112,9 @@ The highest-priority remaining step is still hardware-gated: run the readiness
 flow against a real Hermes installation on the Mac Studio and confirm the live
 CLI/profile surface end to end.
 
-The highest-priority remaining non-hardware work is now the next Stage 3
-substrate on top of this runtime baseline: extend the new telemetry-backed
-execution-trace and harness-variant foundation into broader replay/eval flow
-instead of keeping §8.3b in planning-only form.
+The highest-priority remaining non-hardware work is now to widen this replay
+substrate across more repo-owned flows so the §8.3b frontier is driven by
+broader archived evidence instead of primarily the runtime proofs.
 
 ## What Is In This Repo
 
@@ -138,9 +137,12 @@ Today, this repository includes:
   check against the operator bootstrap checklist, and prove a deterministic
   operator workflow plus a council-backed opportunity and phase-gate path
   against a mock runtime
-- an initial §8.3b telemetry substrate with persisted `execution_traces`,
-  `harness_variants`, promoted frontier views, and operator/observability
-  lifecycle surfaces
+- a working §8.3b replay substrate with persisted `execution_traces`,
+  `harness_variants`, replay-derived `VariantEvalResult`, promoted frontier
+  views, replay artifact traces, and operator/observability lifecycle surfaces
+- runtime workflow trace logging beyond the contract harness, so both the
+  deterministic operator workflow and replay engine write durable telemetry
+  evidence into `telemetry.db`
 - GitHub Actions CI that runs the full test suite on `main`, `codex/**`, and
   pull requests to `main`
 

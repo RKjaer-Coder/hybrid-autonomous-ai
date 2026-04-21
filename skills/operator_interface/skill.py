@@ -588,15 +588,7 @@ class OperatorInterfaceSkill:
         reference_time: str | None = None,
     ) -> dict[str, Any]:
         now = self._resolve_now(reference_time)
-        variants = self._harness_variants.list_variants(limit=1, status=None)
-        matching = next((row for row in variants if row["variant_id"] == variant_id), None)
-        if matching is None:
-            matching = next(
-                (row for row in self._harness_variants.list_variants(limit=100) if row["variant_id"] == variant_id),
-                None,
-            )
-        if matching is None:
-            raise KeyError(variant_id)
+        matching = self._harness_variants.get_variant(variant_id)
         result = self._harness_variants.record_eval_result(
             variant_id,
             VariantEvalResult(
@@ -624,6 +616,35 @@ class OperatorInterfaceSkill:
                 eval_duration_ms=eval_duration_ms,
                 created_at=now,
             ),
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def evaluate_harness_variant_from_traces(
+        self,
+        *,
+        variant_id: str,
+        sample_size: int = 50,
+        minimum_trace_count: int = 3,
+        minimum_known_bad_traces: int = 1,
+        known_bad_score_threshold: float = 0.35,
+        per_trace_cost_cu: float = 0.05,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._harness_variants.evaluate_variant_from_traces(
+            variant_id,
+            sample_size=sample_size,
+            minimum_trace_count=minimum_trace_count,
+            minimum_known_bad_traces=minimum_known_bad_traces,
+            known_bad_score_threshold=known_bad_score_threshold,
+            per_trace_cost_cu=per_trace_cost_cu,
             reference_time=now,
         )
         operator = self._db.get_connection("operator_digest")
@@ -1638,6 +1659,16 @@ def operator_interface_entry(action: str, **kwargs):
             traces_evaluated=kwargs["traces_evaluated"],
             compute_cost_cu=kwargs["compute_cost_cu"],
             eval_duration_ms=kwargs["eval_duration_ms"],
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "evaluate_harness_variant_from_traces":
+        return _SKILL.evaluate_harness_variant_from_traces(
+            variant_id=kwargs["variant_id"],
+            sample_size=kwargs.get("sample_size", 50),
+            minimum_trace_count=kwargs.get("minimum_trace_count", 3),
+            minimum_known_bad_traces=kwargs.get("minimum_known_bad_traces", 1),
+            known_bad_score_threshold=kwargs.get("known_bad_score_threshold", 0.35),
+            per_trace_cost_cu=kwargs.get("per_trace_cost_cu", 0.05),
             reference_time=kwargs.get("reference_time"),
         )
     if action == "generate_digest":

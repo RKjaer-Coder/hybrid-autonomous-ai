@@ -212,6 +212,7 @@ class OperatorWorkflowResult:
     digest: dict[str, Any] | None
     observability: WorkflowObservabilitySnapshot | None
     doctor: RuntimeDoctorResult
+    trace_id: str | None = None
     error: str | None = None
 
 
@@ -1689,8 +1690,63 @@ def run_operator_workflow(
     council_verdict_ids: list[str] = []
     alert_id: str | None = None
     digest_payload: dict[str, Any] | None = None
+    trace_steps: list[ExecutionTraceStep] = []
+    logged_trace_id: str | None = None
+
+    def append_trace_step(step_name: str, skill_name: str, result: Any) -> None:
+        payload = {
+            "success": bool(getattr(result, "success", False)),
+            "error": getattr(result, "error", None),
+            "output": getattr(result, "output", None),
+        }
+        trace_steps.append(
+            ExecutionTraceStep(
+                step_index=len(trace_steps) + 1,
+                tool_call=f"{skill_name}.{step_name}",
+                tool_result=json.dumps(payload, sort_keys=True, default=str)[:4096],
+                tool_result_file=None,
+                tokens_in=0,
+                tokens_out=0,
+                latency_ms=int(getattr(result, "duration_ms", 0) or 0),
+                model_used=model_name,
+            )
+        )
+
+    def persist_trace(*, ok: bool, error: str | None) -> str:
+        nonlocal logged_trace_id
+        if logged_trace_id is not None:
+            return logged_trace_id
+        logged_trace_id = generate_uuid_v7()
+        _log_execution_trace(
+            resolved,
+            ExecutionTrace(
+                trace_id=logged_trace_id,
+                task_id=task_id,
+                role="operator_workflow",
+                skill_name="runtime",
+                harness_version="operator_workflow_v1",
+                intent_goal=title,
+                steps=list(trace_steps),
+                prompt_template="deterministic operator workflow smoke test",
+                context_assembled=summary,
+                retrieval_queries=[],
+                judge_verdict="PASS" if ok else "FAIL",
+                judge_reasoning="Operator workflow completed." if ok else (error or "Operator workflow failed."),
+                outcome_score=1.0 if ok else 0.0,
+                cost_usd=0.0,
+                duration_ms=sum(step.latency_ms for step in trace_steps),
+                training_eligible=ok,
+                retention_class="STANDARD" if ok else "FAILURE_AUDIT",
+                source_chain_id=chain_id,
+                source_session_id=session_id,
+                source_trace_id=None,
+                created_at=_utc_now(),
+            ),
+        )
+        return logged_trace_id
 
     def _fail(error: str | None, *, observability: WorkflowObservabilitySnapshot | None = None) -> OperatorWorkflowResult:
+        trace_id = persist_trace(ok=False, error=error)
         doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
         return OperatorWorkflowResult(
             ok=False,
@@ -1710,6 +1766,7 @@ def run_operator_workflow(
             digest=digest_payload,
             observability=observability,
             doctor=doctor,
+            trace_id=trace_id,
             error=error,
         )
 
@@ -1735,6 +1792,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="heartbeat", skill="operator_interface", result=heartbeat)
+    append_trace_step("record_heartbeat", "operator_interface", heartbeat)
     if not heartbeat.success:
         return _fail(heartbeat.error)
 
@@ -1754,6 +1812,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="sheriff", skill="immune_system", result=sheriff)
+    append_trace_step("sheriff", "immune_system", sheriff)
     if not sheriff.success:
         return _fail(sheriff.error)
     sheriff_verdict = sheriff.output
@@ -1785,6 +1844,7 @@ def run_operator_workflow(
         result=route,
         quality_warning=bool(route.success and getattr(route.output, "quality_warning", False)),
     )
+    append_trace_step("route", "financial_router", route)
     if not route.success:
         return _fail(route.error)
     routing_decision = route.output
@@ -1807,6 +1867,7 @@ def run_operator_workflow(
         skill="research_domain_2",
         result=opportunity_task,
     )
+    append_trace_step("create_task", "research_domain_2", opportunity_task)
     if not opportunity_task.success:
         return _fail(opportunity_task.error)
     opportunity_task_id = opportunity_task.output
@@ -1850,6 +1911,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="write_brief", skill="strategic_memory", result=write_result)
+    append_trace_step("write_brief", "strategic_memory", write_result)
     if not write_result.success:
         return _fail(write_result.error)
     brief_id = write_result.output
@@ -1862,6 +1924,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="read_brief", skill="strategic_memory", result=read_result)
+    append_trace_step("read_brief", "strategic_memory", read_result)
     if not read_result.success:
         return _fail(read_result.error)
     readback = read_result.output
@@ -1875,6 +1938,7 @@ def run_operator_workflow(
             "actual_spend_usd": 0.0,
         },
     )
+    append_trace_step("complete_task", "research_domain_2", complete_opportunity_task)
     if not complete_opportunity_task.success:
         return _fail(complete_opportunity_task.error)
 
@@ -1902,6 +1966,7 @@ def run_operator_workflow(
         skill="research_domain_2",
         result=route_opportunity_brief,
     )
+    append_trace_step("route_task_output", "research_domain_2", route_opportunity_brief)
     if not route_opportunity_brief.success:
         return _fail(route_opportunity_brief.error)
     for action in route_opportunity_brief.output["actions"]:
@@ -1929,6 +1994,7 @@ def run_operator_workflow(
         skill="research_domain_2",
         result=harvest_task,
     )
+    append_trace_step("create_task", "research_domain_2", harvest_task)
     if not harvest_task.success:
         return _fail(harvest_task.error)
     harvest_task_id = harvest_task.output
@@ -1945,6 +2011,7 @@ def run_operator_workflow(
             "action_type": "operator_surface",
         },
     )
+    append_trace_step("write_brief", "strategic_memory", harvest_brief)
     if not harvest_brief.success:
         return _fail(harvest_brief.error)
 
@@ -1957,6 +2024,7 @@ def run_operator_workflow(
             "actual_spend_usd": 0.0,
         },
     )
+    append_trace_step("complete_task", "research_domain_2", complete_harvest_task)
     if not complete_harvest_task.success:
         return _fail(complete_harvest_task.error)
 
@@ -1976,6 +2044,7 @@ def run_operator_workflow(
         skill="research_domain_2",
         result=route_harvest_brief,
     )
+    append_trace_step("route_task_output", "research_domain_2", route_harvest_brief)
     if not route_harvest_brief.success:
         return _fail(route_harvest_brief.error)
     for action in route_harvest_brief.output["actions"]:
@@ -1996,6 +2065,7 @@ def run_operator_workflow(
             "council_verdict_id": council_verdict_ids[0] if council_verdict_ids else None,
         },
     )
+    append_trace_step("transition_opportunity", "opportunity_pipeline", transition_validation)
     if not transition_validation.success:
         return _fail(transition_validation.error)
     transition_go_no_go = tool_registry.invoke_tool(
@@ -2008,6 +2078,7 @@ def run_operator_workflow(
             "council_verdict_id": council_verdict_ids[0] if council_verdict_ids else None,
         },
     )
+    append_trace_step("transition_opportunity", "opportunity_pipeline", transition_go_no_go)
     if not transition_go_no_go.success:
         return _fail(transition_go_no_go.error)
 
@@ -2019,6 +2090,7 @@ def run_operator_workflow(
             "project_name": f"{title} Project",
         },
     )
+    append_trace_step("handoff_to_project", "opportunity_pipeline", project_handoff)
     if not project_handoff.success:
         return _fail(project_handoff.error)
     project_id = project_handoff.output["project_id"]
@@ -2045,6 +2117,7 @@ def run_operator_workflow(
         skill="opportunity_pipeline",
         result=phase_gate_trigger,
     )
+    append_trace_step("trigger_phase_gate", "opportunity_pipeline", phase_gate_trigger)
     if not phase_gate_trigger.success:
         return _fail(phase_gate_trigger.error)
     phase_gate_id = phase_gate_trigger.output["gate_id"]
@@ -2075,6 +2148,7 @@ def run_operator_workflow(
         skill="council",
         result=phase_gate_council,
     )
+    append_trace_step("deliberate", "council", phase_gate_council)
     if not phase_gate_council.success:
         return _fail(phase_gate_council.error)
     phase_gate_council_verdict = phase_gate_council.output
@@ -2103,6 +2177,7 @@ def run_operator_workflow(
         skill="opportunity_pipeline",
         result=apply_phase_gate,
     )
+    append_trace_step("apply_phase_gate_verdict", "opportunity_pipeline", apply_phase_gate)
     if not apply_phase_gate.success:
         return _fail(apply_phase_gate.error)
 
@@ -2119,6 +2194,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="judge", skill="immune_system", result=judge)
+    append_trace_step("judge", "immune_system", judge)
     if not judge.success:
         return _fail(judge.error)
     judge_verdict = judge.output
@@ -2139,6 +2215,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="alert", skill="operator_interface", result=alert_result)
+    append_trace_step("alert", "operator_interface", alert_result)
     if not alert_result.success:
         return _fail(alert_result.error)
     alert_id = alert_result.output
@@ -2152,6 +2229,7 @@ def run_operator_workflow(
         },
     )
     _record_tool_step(resolved, chain_id=chain_id, step_type="digest", skill="operator_interface", result=digest_result)
+    append_trace_step("generate_digest", "operator_interface", digest_result)
     if not digest_result.success:
         return _fail(digest_result.error)
     digest_payload = digest_result.output
@@ -2181,6 +2259,16 @@ def run_operator_workflow(
         observability_reliability,
         observability_health,
     ]
+    for step_name, result in (
+        ("query_alert_history", observability_alerts),
+        ("query_council_verdicts", observability_council),
+        ("recent_digests", observability_digests),
+        ("query_immune_verdicts", observability_immune),
+        ("query_telemetry", observability_telemetry),
+        ("reliability_dashboard", observability_reliability),
+        ("system_health", observability_health),
+    ):
+        append_trace_step(step_name, "observability", result)
     first_failure = next((item for item in observability_results if not item.success), None)
     if first_failure is not None:
         return _fail(first_failure.error)
@@ -2195,6 +2283,7 @@ def run_operator_workflow(
         system_health=observability_health.output,
     )
     doctor = doctor_runtime(tool_registry, config=resolved, bootstrap_if_needed=False)
+    trace_id = persist_trace(ok=doctor.ok, error=None if doctor.ok else "doctor reported missing runtime components")
     return OperatorWorkflowResult(
         ok=doctor.ok,
         bootstrap=bootstrap,
@@ -2213,6 +2302,7 @@ def run_operator_workflow(
         digest=digest_payload,
         observability=observability,
         doctor=doctor,
+        trace_id=trace_id,
         error=None if doctor.ok else "doctor reported missing runtime components",
     )
 

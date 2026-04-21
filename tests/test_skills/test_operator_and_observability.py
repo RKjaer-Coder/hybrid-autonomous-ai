@@ -1254,3 +1254,97 @@ def test_operator_and_observability_surface_harness_variants_and_traces(test_dat
     assert health["harness_variants"]["execution_traces"]["total_count"] == 1
     assert health["harness_variants"]["execution_traces"]["training_eligible_count"] == 1
     assert health["harness_variants"]["variants"]["promoted_count"] == 1
+
+
+def test_operator_can_run_replay_eval_from_execution_traces(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    for idx, score in enumerate((0.71, 0.76, 0.8), start=1):
+        manager.log_execution_trace(
+            ExecutionTrace(
+                trace_id=f"research-trace-{idx}",
+                task_id=f"research-task-{idx}",
+                role="runtime",
+                skill_name="research_domain",
+                harness_version="baseline-v1",
+                intent_goal="replay baseline",
+                steps=[
+                    ExecutionTraceStep(
+                        step_index=1,
+                        tool_call="research_domain_2.create_task",
+                        tool_result='{"ok":true}',
+                        tool_result_file=None,
+                        tokens_in=0,
+                        tokens_out=0,
+                        latency_ms=4,
+                        model_used="local-default",
+                    )
+                ],
+                prompt_template="baseline prompt",
+                context_assembled="evidence " * 35,
+                retrieval_queries=["query-a", "query-b"],
+                judge_verdict="PASS",
+                judge_reasoning="ok",
+                outcome_score=score,
+                cost_usd=0.0,
+                duration_ms=22,
+                training_eligible=True,
+                retention_class="STANDARD",
+                source_chain_id=f"research-chain-{idx}",
+                source_session_id=f"research-session-{idx}",
+                source_trace_id=None,
+                created_at=f"2026-04-21T13:0{idx}:00+00:00",
+            )
+        )
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="research-known-bad",
+            task_id="research-task-bad",
+            role="runtime",
+            skill_name="research_domain",
+            harness_version="baseline-v1",
+            intent_goal="replay bad set",
+            steps=[],
+            prompt_template="baseline prompt",
+            context_assembled="evidence " * 10,
+            retrieval_queries=["unsafe"],
+            judge_verdict="FAIL",
+            judge_reasoning="bad",
+            outcome_score=0.08,
+            cost_usd=0.0,
+            duration_ms=8,
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            source_chain_id="research-chain-bad",
+            source_session_id="research-session-bad",
+            source_trace_id=None,
+            created_at="2026-04-21T13:09:00+00:00",
+        )
+    )
+
+    proposed = operator.propose_harness_variant(
+        skill_name="research_domain",
+        parent_version="baseline-v1",
+        diff="@@ -1 +1 @@\n-old\n+new\n",
+        prompt_prelude="Tighten evidence grounding and clarify the rubric.",
+        retrieval_strategy_diff="Use multi-query retrieval and rerank the strongest evidence.",
+        scoring_formula_diff="Calibrate thresholds and reward grounded evidence.",
+        context_assembly_diff="Compress context and prioritize the highest-signal snippets.",
+        reference_time="2026-04-21T13:10:00+00:00",
+    )
+
+    evaluated = operator.evaluate_harness_variant_from_traces(
+        variant_id=proposed["variant_id"],
+        sample_size=10,
+        minimum_trace_count=3,
+        minimum_known_bad_traces=1,
+        reference_time="2026-04-21T13:11:00+00:00",
+    )
+
+    assert evaluated["status"] == "PROMOTED"
+    assert evaluated["eval_result"]["traces_evaluated"] == 3
+    assert evaluated["eval_result"]["known_bad_block_rate"] == 1.0
+    assert evaluated["eval_result"]["gate_1_pass"] is True
