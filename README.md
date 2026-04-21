@@ -12,7 +12,7 @@ It is still pre-live from a real Hermes deployment perspective.
 
 ## Latest Progress
 
-As of April 16, 2026, GitHub `main` includes the latest validated Hermes
+As of April 21, 2026, GitHub `main` still includes the latest validated Hermes
 runtime attachment work:
 
 - repo-owned Hermes profile generation under `~/.hermes/profiles/<profile>/`
@@ -59,13 +59,23 @@ audited Judge fallback mode:
 - `immune_system.db` now persists explicit `judge_fallback_events` and
   `judge_fallback_review_queue` state instead of treating fallback as an
   implicit runtime condition
+- normal Judge audit rows now also persist explicit `task_type` metadata, so
+  deadlock diversity keys off the spec's task-type contract with legacy
+  fallback for older rows
 - automatic `JUDGE_DEADLOCK` triggering now promotes sustained normal-Judge
   block spikes into a 30-minute audited fallback window
 - the once-per-24h guard now halts into a fail-closed `FULL_SYSTEM_HALT`
   posture on retrigger instead of oscillating between bypass and deadlock
+- `operator_digest.db` now persists a runtime halt/restart control plane with
+  active halt state, halt history, and blocked/completed restart attempts
+- deadlock-triggered `FULL_SYSTEM_HALT` now escalates into that runtime halt
+  contract instead of living only inside the Judge lifecycle
+- the Hermes dispatch patch now checks runtime halt state before executing the
+  underlying tool, so halted runtimes fail closed before tool side effects
+  happen instead of blocking only after output validation
 - operator and observability surfaces now expose active deadlock state,
-  fallback expiry, restart-required halt state, and retroactive review queue
-  counts
+  fallback expiry, restart-required halt state, runtime halt/restart status,
+  and retroactive review queue counts
 - fallback-passed outputs are now queued for retroactive full-Judge review
   when the deadlock is cleared, so fallback passes do not disappear from later
   audit
@@ -73,26 +83,39 @@ audited Judge fallback mode:
 That still does not amount to the full target-state restart story from the
 spec:
 
-- deadlock diversity is currently approximated by distinct `skill_name` values
-  rather than a richer persisted task-type taxonomy
-- `FULL_SYSTEM_HALT` is implemented here as an audited fail-closed Judge halt
-  plus breaker state, not as a directly verified Hermes-wide process stop and
-  restart workflow
+- the repo now has an audited runtime halt/restart contract, but it is still
+  not a directly verified Hermes-wide process stop and restart workflow on a
+  live install
 - none of this changes the repo's pre-live boundary because Hermes is still
   not installed and live autonomy has not been re-verified on real hardware
 
-The paid-call lifecycle is also still thinner than the full spec in places:
-Path B per-call G3 approval, post-approval dispatch, and final cost
-reconciliation still do not yet match the richer written architecture end to
-end.
+This branch now also lands the remaining pre-Hermes Path B / per-call G3
+governance lifecycle for paid routes outside project budget:
+
+- `financial_ledger.db` now persists durable `g3_approval_requests` records
+  keyed by correlation id, with project/session/task context, requested model,
+  estimated cost, justification, expiry, and explicit request status
+- paid route selection is now separated from paid dispatch:
+  Path B requests persist as pending approval instead of being treated as
+  already spend-authorized, and even Path A paid routes remain
+  `APPROVED_PENDING_DISPATCH` until the call is actually dispatched
+- operator-facing actions now explicitly approve, deny, or expire those
+  requests and keep `gate_log`, routing, and request state aligned
+- paid dispatch now creates the conservative estimated cost record only when
+  the call is actually dispatched, with idempotent reservation protection and
+  explicit final-cost reconciliation into `FINAL` or `DISPUTED` states
+- operator digests and observability now surface pending, approved, denied,
+  and expired G3 request state instead of leaving Path B lifecycle state
+  implicit in a single routing row
 
 The highest-priority remaining step is still hardware-gated: run the readiness
 flow against a real Hermes installation on the Mac Studio and confirm the live
 CLI/profile surface end to end.
 
 The highest-priority remaining non-hardware governance work is now tightening
-the remaining drift between this repo-level deadlock lifecycle and a live
-Hermes-wide halt/restart contract, not the baseline fallback audit state.
+the remaining drift between these repo-local governance/runtime contracts and
+the behavior of a live Hermes-triggered gate, dispatch, halt, and restart
+flow.
 
 ## What Is In This Repo
 
@@ -101,7 +124,8 @@ Today, this repository includes:
 - a five-database SQLite baseline with migrations and drift verification
 - a typed financial router with spend controls and hard approval boundaries
 - an immune subsystem with Sheriff, Judge, bootstrap patching, verdict logs,
-  compound-breaker audit persistence, and explicit audited Judge fallback mode
+  compound-breaker audit persistence, explicit audited Judge fallback mode,
+  and a runtime halt/restart control plane for deadlock-driven full halts
 - council contracts and orchestration support for structured deliberation
 - research, strategic-memory, opportunity, operator, and observability skills
 - milestone eval harnesses and deterministic fixtures

@@ -89,5 +89,45 @@ CREATE TABLE IF NOT EXISTS operator_load_tracking (
 
 CREATE INDEX IF NOT EXISTS idx_operator_load_tracking_week_start ON operator_load_tracking(week_start);
 
+CREATE TABLE IF NOT EXISTS runtime_control_state (
+  state_id TEXT PRIMARY KEY CHECK (state_id = 'runtime'),
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('ACTIVE', 'HALTED')),
+  active_halt_id TEXT,
+  last_halt_reason TEXT,
+  last_transition_at TEXT NOT NULL,
+  last_restart_id TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS runtime_halt_events (
+  halt_id TEXT PRIMARY KEY,
+  halt_scope TEXT NOT NULL CHECK (halt_scope IN ('FULL_SYSTEM_HALT')),
+  source TEXT NOT NULL CHECK (source IN ('JUDGE_DEADLOCK', 'SECURITY_CASCADE', 'MANUAL_TEST')),
+  trigger_event_id TEXT,
+  halt_reason TEXT NOT NULL,
+  requires_human INTEGER NOT NULL CHECK (requires_human IN (0, 1)),
+  created_at TEXT NOT NULL,
+  cleared_at TEXT,
+  clear_reason TEXT,
+  clear_restart_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'CLEARED'))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS runtime_restart_history (
+  restart_id TEXT PRIMARY KEY,
+  halt_id TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  completed_at TEXT,
+  status TEXT NOT NULL CHECK (status IN ('BLOCKED', 'COMPLETED')),
+  restart_reason TEXT NOT NULL,
+  preflight_json TEXT NOT NULL CHECK (json_valid(preflight_json)),
+  notes TEXT,
+  FOREIGN KEY (halt_id) REFERENCES runtime_halt_events(halt_id)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_runtime_halt_events_status_created ON runtime_halt_events(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_halt_events_source_created ON runtime_halt_events(source, created_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_restart_history_status_requested ON runtime_restart_history(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_restart_history_halt_requested ON runtime_restart_history(halt_id, requested_at);
+
 CREATE INDEX IF NOT EXISTS idx_digest_history_created_at ON digest_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_harvest_requests_created_at ON harvest_requests(created_at);

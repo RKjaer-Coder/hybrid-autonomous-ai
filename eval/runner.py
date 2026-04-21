@@ -98,9 +98,9 @@ def _hydrate_financial_budget(payload: dict):
     return BudgetState(**budget_payload)
 
 
-def _seed_financial_ledger(db_dir: pathlib.Path) -> None:
-    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "financial_ledger.sql"
-    db_path = db_dir / "financial_ledger.db"
+def _seed_sqlite_schema(db_dir: pathlib.Path, db_filename: str, schema_filename: str) -> None:
+    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / schema_filename
+    db_path = db_dir / db_filename
     sql = schema_path.read_text(encoding="utf-8")
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript(sql)
@@ -116,7 +116,8 @@ def _run_financial_routing_scenario(scenario: dict) -> dict:
 
     with tempfile.TemporaryDirectory(prefix="eval-m4-") as tmp:
         db_dir = pathlib.Path(tmp)
-        _seed_financial_ledger(db_dir)
+        _seed_sqlite_schema(db_dir, "financial_ledger.db", "financial_ledger.sql")
+        _seed_sqlite_schema(db_dir, "operator_digest.db", "operator_digest.sql")
         reservation_registry = SqliteSpendReservationRegistry(str(db_dir / "reservations.db"))
         prior_registry = router_module._DEFAULT_RESERVATIONS
         try:

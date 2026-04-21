@@ -50,6 +50,7 @@ class ImmuneSystemSkill:
             verdict.tier.value,
             verdict.session_id,
             verdict.skill_name,
+            verdict.task_type,
             verdict.outcome.value,
             verdict.block_reason.value if verdict.block_reason else verdict.block_detail,
             int(latency_ms),

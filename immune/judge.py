@@ -137,6 +137,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
                 schema_err,
                 (time.monotonic_ns() - start) / 1_000_000,
                 AlertSeverity.IMMUNE_BLOCK_FAST,
+                task_type=payload.task_type or payload.skill_name,
             )
     claimed = payload.output.get("claimed_trust_tier")
     if isinstance(claimed, int) and claimed > payload.max_trust_tier:
@@ -151,6 +152,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
             "Output claimed trust tier above max",
             (time.monotonic_ns() - start) / 1_000_000,
             AlertSeverity.IMMUNE_BLOCK_FAST,
+            task_type=payload.task_type or payload.skill_name,
         )
     for text in _iter_strings(payload.output):
         if _safe_scan(text):
@@ -165,6 +167,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
                 "Content safety violation",
                 (time.monotonic_ns() - start) / 1_000_000,
                 AlertSeverity.SECURITY_ALERT,
+                task_type=payload.task_type or payload.skill_name,
             )
     size = len(json.dumps(payload.output))
     if size > 1_048_576:
@@ -179,6 +182,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
             "Output exceeds 1MB",
             (time.monotonic_ns() - start) / 1_000_000,
             AlertSeverity.IMMUNE_BLOCK_FAST,
+            task_type=payload.task_type or payload.skill_name,
         )
     elapsed_ms = (time.monotonic_ns() - start) / 1_000_000
     if elapsed_ms > config.judge_timeout_ms:
@@ -193,6 +197,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
             "Judge timeout",
             elapsed_ms,
             AlertSeverity.IMMUNE_TIMEOUT,
+            task_type=payload.task_type or payload.skill_name,
         )
     return ImmuneVerdict(
         generate_uuid_v7(),
@@ -202,6 +207,7 @@ def _normal_judge_check(payload: JudgePayload, config: ImmuneConfig, start: int)
         payload.session_id,
         Outcome.PASS,
         latency_ms=elapsed_ms,
+        task_type=payload.task_type or payload.skill_name,
     )
 
 
@@ -227,6 +233,7 @@ def _structural_fallback_check(payload: JudgePayload, start: int, trigger: str, 
                     (time.monotonic_ns() - start) / 1_000_000,
                     AlertSeverity.SECURITY_ALERT,
                     judge_mode=JudgeMode.FALLBACK,
+                    task_type=payload.task_type or payload.skill_name,
                 )
             if _safe_scan(text):
                 return ImmuneVerdict(
@@ -241,6 +248,7 @@ def _structural_fallback_check(payload: JudgePayload, start: int, trigger: str, 
                     (time.monotonic_ns() - start) / 1_000_000,
                     AlertSeverity.SECURITY_ALERT,
                     judge_mode=JudgeMode.FALLBACK,
+                    task_type=payload.task_type or payload.skill_name,
                 )
         return ImmuneVerdict(
             generate_uuid_v7(),
@@ -252,6 +260,7 @@ def _structural_fallback_check(payload: JudgePayload, start: int, trigger: str, 
             block_detail=_structural_fallback_reason(trigger, detail),
             latency_ms=(time.monotonic_ns() - start) / 1_000_000,
             judge_mode=JudgeMode.FALLBACK,
+            task_type=payload.task_type or payload.skill_name,
         )
     except Exception:
         return ImmuneVerdict(
@@ -266,6 +275,7 @@ def _structural_fallback_check(payload: JudgePayload, start: int, trigger: str, 
             0.0,
             AlertSeverity.SECURITY_ALERT,
             judge_mode=JudgeMode.FALLBACK,
+            task_type=getattr(payload, "task_type", None) or getattr(payload, "skill_name", "unknown"),
         )
 
 
@@ -312,6 +322,7 @@ def judge_check(payload: JudgePayload, config: ImmuneConfig) -> ImmuneVerdict:
             "Judge internal error — fail closed",
             0.0,
             AlertSeverity.SECURITY_ALERT,
+            task_type=getattr(payload, "task_type", None) or getattr(payload, "skill_name", "unknown"),
         )
 
 

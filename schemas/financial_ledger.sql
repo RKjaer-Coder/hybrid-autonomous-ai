@@ -150,13 +150,43 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
   project_id TEXT,
   session_id TEXT,
   correlation_id TEXT,
-  cost_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (cost_status IN ('NOT_APPLICABLE','ESTIMATED','FINAL','DISPUTED'))
+  cost_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (cost_status IN ('NOT_APPLICABLE','ESTIMATED','FINAL','DISPUTED')),
+  approval_request_id TEXT,
+  dispatch_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (dispatch_status IN ('NOT_APPLICABLE','AWAITING_APPROVAL','APPROVED_PENDING_DISPATCH','DISPATCHED','FINALIZED','DENIED','EXPIRED')),
+  dispatched_at TEXT,
+  finalized_at TEXT,
+  final_cost_usd REAL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_role_created ON routing_decisions(role, created_at);
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_route_selected ON routing_decisions(route_selected);
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_correlation_id ON routing_decisions(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_approval_request_id ON routing_decisions(approval_request_id);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_dispatch_status ON routing_decisions(dispatch_status, created_at);
 CREATE INDEX IF NOT EXISTS idx_routing_decisions_cost_status ON routing_decisions(cost_status, created_at);
+
+CREATE TABLE IF NOT EXISTS g3_approval_requests (
+  request_id TEXT PRIMARY KEY,
+  correlation_id TEXT NOT NULL,
+  project_id TEXT,
+  session_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  route_decision_id TEXT NOT NULL,
+  gate_id TEXT,
+  requested_model TEXT NOT NULL,
+  estimated_cost_usd REAL NOT NULL CHECK (estimated_cost_usd >= 0.0),
+  justification TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','APPROVED','DENIED','EXPIRED')),
+  operator_notes TEXT,
+  responded_at TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_g3_approval_requests_correlation_id ON g3_approval_requests(correlation_id);
+CREATE INDEX IF NOT EXISTS idx_g3_approval_requests_status_requested ON g3_approval_requests(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_g3_approval_requests_expires_at ON g3_approval_requests(expires_at);
+CREATE INDEX IF NOT EXISTS idx_g3_approval_requests_project_status ON g3_approval_requests(project_id, status);
 
 CREATE VIEW IF NOT EXISTS project_pnl AS
 SELECT

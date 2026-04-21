@@ -95,6 +95,7 @@ class VerdictLogger:
                 v.tier.value,
                 v.session_id,
                 v.skill_name,
+                v.task_type,
                 "TIMEOUT" if v.block_reason and v.block_reason.value == "TIMEOUT" else v.outcome.value,
                 v.block_reason.value if v.block_reason else v.block_detail,
                 int(v.latency_ms),
@@ -107,8 +108,8 @@ class VerdictLogger:
             with self._lock:
                 self._conn.executemany(
                     "INSERT INTO immune_verdicts "
-                    "(verdict_id, verdict_type, scan_tier, session_id, skill_name, result, match_pattern, latency_ms, judge_mode, timestamp) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(verdict_id, verdict_type, scan_tier, session_id, skill_name, task_type, result, match_pattern, latency_ms, judge_mode, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
                 self._conn.commit()

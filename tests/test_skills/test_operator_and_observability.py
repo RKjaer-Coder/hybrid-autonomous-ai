@@ -30,6 +30,7 @@ def _insert_normal_judge_verdict(
     immune,
     *,
     skill_name: str,
+    task_type: str | None = None,
     result: str,
     timestamp: str,
 ) -> None:
@@ -37,8 +38,8 @@ def _insert_normal_judge_verdict(
         """
         INSERT INTO immune_verdicts (
             verdict_id, verdict_type, scan_tier, session_id, skill_name,
-            result, match_pattern, latency_ms, timestamp, judge_mode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            task_type, result, match_pattern, latency_ms, timestamp, judge_mode
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
@@ -46,6 +47,7 @@ def _insert_normal_judge_verdict(
             "fast_path",
             f"session-{skill_name}-{result}-{timestamp}",
             skill_name,
+            task_type or skill_name,
             result,
             "seeded",
             5,
@@ -503,6 +505,10 @@ def test_quarantined_responses_and_disputed_costs_surface_for_operator_review(te
             max_api_spend_usd=10.0,
         ),
     )
+    operator.dispatch_approved_paid_route(
+        correlation_id="corr-quarantine-1",
+        jwt_claims={"session_id": "session-quarantine", "max_api_spend_usd": 10.0, "current_session_spend_usd": 0.0},
+    )
     router.quarantine_inflight_paid_response(
         correlation_id="corr-quarantine-1",
         response_payload={"ok": True, "output": "late paid response"},
@@ -539,6 +545,122 @@ def test_quarantined_responses_and_disputed_costs_surface_for_operator_review(te
     assert pending_after == []
 
 
+def test_g3_requests_surface_for_operator_digest_and_observability(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    router = FinancialRouterSkill(db)
+    financial = db.get_connection("financial_ledger")
+    now = _now()
+
+    financial.execute(
+        """
+        INSERT INTO treasury VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("treasury-g3", "injection", 40.0, 40.0, None, "Seeded treasury", _ts(now - datetime.timedelta(hours=1))),
+    )
+    financial.commit()
+    operator.record_heartbeat("command")
+
+    router.route(
+        task=TaskMetadata(
+            task_id="task-g3",
+            task_type="reasoning",
+            required_capability="analysis",
+            quality_threshold=0.9,
+            estimated_task_value_usd=100.0,
+            project_id="project-g3",
+            idempotency_key="corr-g3-pending",
+            is_operating_phase=True,
+        ),
+        models=[ModelInfo("paid-frontier", "paid", True, 0.96, 0.005)],
+        budget=BudgetState(
+            system_phase=SystemPhase.OPERATING,
+            project_cloud_spend_cap_usd=None,
+            project_cashflow_target_usd=5000.0,
+        ),
+        jwt=JWTClaims(session_id="session-g3", max_api_spend_usd=10.0),
+    )
+    pending_request = operator.list_g3_approval_requests(limit=5, status="PENDING")[0]
+
+    approved = operator.review_g3_approval_request(
+        pending_request["request_id"],
+        "APPROVE",
+        operator_notes="Frontier model justified outside the project budget.",
+        reference_time=_ts(now + datetime.timedelta(minutes=5)),
+    )
+    denied_request = router.route(
+        task=TaskMetadata(
+            task_id="task-g3-denied",
+            task_type="reasoning",
+            required_capability="analysis",
+            quality_threshold=0.9,
+            estimated_task_value_usd=100.0,
+            project_id="project-g3",
+            idempotency_key="corr-g3-denied",
+            is_operating_phase=True,
+        ),
+        models=[ModelInfo("paid-frontier", "paid", True, 0.96, 0.005)],
+        budget=BudgetState(
+            system_phase=SystemPhase.OPERATING,
+            project_cloud_spend_cap_usd=None,
+            project_cashflow_target_usd=5000.0,
+        ),
+        jwt=JWTClaims(session_id="session-g3-denied", max_api_spend_usd=10.0),
+    )
+    assert denied_request.requires_operator_approval is True
+    denied_request_row = operator.list_g3_approval_requests(limit=5, status="PENDING")[0]
+    denied = operator.review_g3_approval_request(
+        denied_request_row["request_id"],
+        "DENY",
+        operator_notes="Use a non-paid fallback instead.",
+        reference_time=_ts(now + datetime.timedelta(minutes=10)),
+    )
+
+    router.route(
+        task=TaskMetadata(
+            task_id="task-g3-expired",
+            task_type="reasoning",
+            required_capability="analysis",
+            quality_threshold=0.9,
+            estimated_task_value_usd=100.0,
+            project_id="project-g3",
+            idempotency_key="corr-g3-expired",
+            is_operating_phase=True,
+        ),
+        models=[ModelInfo("paid-frontier", "paid", True, 0.96, 0.005)],
+        budget=BudgetState(
+            system_phase=SystemPhase.OPERATING,
+            project_cloud_spend_cap_usd=None,
+            project_cashflow_target_usd=5000.0,
+        ),
+        jwt=JWTClaims(session_id="session-g3-expired", max_api_spend_usd=10.0),
+    )
+    expired_request_row = operator.list_g3_approval_requests(limit=5, status="PENDING")[0]
+    expired = operator.review_g3_approval_request(
+        expired_request_row["request_id"],
+        "EXPIRE",
+        operator_notes="Timed out in operator testing.",
+        reference_time=_ts(now + datetime.timedelta(minutes=15)),
+    )
+
+    pending_rows = operator.list_g3_approval_requests(limit=5, status="PENDING")
+    recent_requests = observability.recent_g3_approval_requests(limit=10)
+    health = observability.system_health()
+    digest = operator.generate_digest(digest_type="critical_only", operator_state="ACTIVE")
+
+    assert approved["status"] == "APPROVED"
+    assert denied["status"] == "DENIED"
+    assert expired["status"] == "EXPIRED"
+    assert pending_rows == []
+    assert {row["status"] for row in recent_requests[:3]} == {"APPROVED", "DENIED", "EXPIRED"}
+    assert health["g3_requests"]["pending_count"] == 0
+    assert health["g3_requests"]["approved_24h"] == 1
+    assert health["g3_requests"]["denied_24h"] == 1
+    assert health["g3_requests"]["expired_24h"] == 1
+    assert "g3=pending:0/approved24h:1/denied24h:1/expired24h:1" in digest["content"]
+
+
 def test_judge_fallback_incidents_surface_in_observability_and_digest(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
@@ -551,14 +673,15 @@ def test_judge_fallback_incidents_surface_in_observability_and_digest(test_data_
         """
         INSERT INTO immune_verdicts (
             verdict_id, verdict_type, scan_tier, session_id, skill_name,
-            result, match_pattern, latency_ms, judge_mode, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            task_type, result, match_pattern, latency_ms, judge_mode, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
             "judge_output",
             "fast_path",
             "session-fallback-1",
+            "operator_interface",
             "operator_interface",
             "PASS",
             "Judge structural fallback: judge_degraded",
@@ -571,14 +694,15 @@ def test_judge_fallback_incidents_surface_in_observability_and_digest(test_data_
         """
         INSERT INTO immune_verdicts (
             verdict_id, verdict_type, scan_tier, session_id, skill_name,
-            result, match_pattern, latency_ms, judge_mode, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            task_type, result, match_pattern, latency_ms, judge_mode, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
             "judge_output",
             "fast_path",
             "session-fallback-2",
+            "observability",
             "observability",
             "BLOCK",
             "Structural fallback blocked sensitive output",
@@ -751,6 +875,148 @@ def test_judge_deadlock_fallback_auto_expiry_halts_when_blocks_persist(test_data
     assert events[0]["end_reason"] == "judge_deadlock_fallback_expired_with_persistent_blocks"
 
 
+def test_runtime_halt_contract_surfaces_and_allows_audited_restart_after_deadlock_clears(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    immune = db.get_connection("immune")
+    manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
+    now = _now()
+
+    for skill_name, result, minutes_ago in [
+        ("planner", "BLOCK", 5),
+        ("research_domain", "BLOCK", 4),
+        ("operator_interface", "BLOCK", 3),
+        ("observability", "PASS", 2),
+        ("council", "BLOCK", 1),
+        ("financial_router", "BLOCK", 0),
+    ]:
+        _insert_normal_judge_verdict(
+            immune,
+            skill_name=skill_name,
+            result=result,
+            timestamp=_ts(now - datetime.timedelta(minutes=minutes_ago)),
+        )
+    immune.commit()
+
+    payload = JudgePayload(
+        session_id="deadlock-expiry-runtime-trigger",
+        skill_name="financial_router",
+        tool_name="route",
+        output={"secret": "sk-trigger"},
+        expected_schema=None,
+    )
+    activation = manager.record_verdict(payload, judge_check(payload, load_config()), reference_time=_ts(now))
+
+    later = now + datetime.timedelta(minutes=31)
+    for skill_name, result, minutes_ago in [
+        ("planner", "BLOCK", 5),
+        ("research_domain", "BLOCK", 4),
+        ("operator_interface", "BLOCK", 3),
+        ("observability", "PASS", 2),
+        ("council", "BLOCK", 1),
+        ("financial_router", "BLOCK", 0),
+    ]:
+        _insert_normal_judge_verdict(
+            immune,
+            skill_name=skill_name,
+            result=result,
+            timestamp=_ts(later - datetime.timedelta(minutes=minutes_ago)),
+        )
+    immune.commit()
+
+    halted_status = manager.status(reference_time=_ts(later))
+    runtime_status = operator.runtime_status()
+    health = observability.system_health()
+    digest = operator.generate_digest(digest_type="critical_only", operator_state="ACTIVE")
+
+    assert activation is not None
+    assert halted_status["mode"] == "HALTED"
+    assert runtime_status["lifecycle_state"] == "HALTED"
+    assert runtime_status["active_halt"]["source"] == "JUDGE_DEADLOCK"
+    assert health["runtime_control"]["lifecycle_state"] == "HALTED"
+    assert "runtime HALTED source=JUDGE_DEADLOCK" in digest["content"]
+
+    restarted = operator.restart_runtime_after_halt(
+        restart_reason="operator_runtime_restart",
+        notes="judge drift corrected",
+        reference_time=_ts(now + datetime.timedelta(minutes=40)),
+    )
+    final_runtime_status = operator.runtime_status()
+    restart_history = operator.list_runtime_restart_history(limit=5)
+
+    assert restarted["status"] == "COMPLETED"
+    assert restarted["judge_restart"]["status"] == "CLEARED"
+    assert restarted["runtime_restart"]["status"] == "COMPLETED"
+    assert final_runtime_status["lifecycle_state"] == "ACTIVE"
+    assert restart_history[0]["status"] == "COMPLETED"
+
+
+def test_runtime_restart_attempt_is_blocked_while_deadlock_persists(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    immune = db.get_connection("immune")
+    manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
+    now = _now()
+
+    for skill_name, result, minutes_ago in [
+        ("planner", "BLOCK", 5),
+        ("research_domain", "BLOCK", 4),
+        ("operator_interface", "BLOCK", 3),
+        ("observability", "PASS", 2),
+        ("council", "BLOCK", 1),
+        ("financial_router", "BLOCK", 0),
+    ]:
+        _insert_normal_judge_verdict(
+            immune,
+            skill_name=skill_name,
+            result=result,
+            timestamp=_ts(now - datetime.timedelta(minutes=minutes_ago)),
+        )
+    immune.commit()
+
+    payload = JudgePayload(
+        session_id="deadlock-blocked-runtime-trigger",
+        skill_name="financial_router",
+        tool_name="route",
+        output={"secret": "sk-trigger"},
+        expected_schema=None,
+    )
+    manager.record_verdict(payload, judge_check(payload, load_config()), reference_time=_ts(now))
+
+    later = now + datetime.timedelta(minutes=31)
+    for skill_name, result, minutes_ago in [
+        ("planner", "BLOCK", 5),
+        ("research_domain", "BLOCK", 4),
+        ("operator_interface", "BLOCK", 3),
+        ("observability", "PASS", 2),
+        ("council", "BLOCK", 1),
+        ("financial_router", "BLOCK", 0),
+    ]:
+        _insert_normal_judge_verdict(
+            immune,
+            skill_name=skill_name,
+            result=result,
+            timestamp=_ts(later - datetime.timedelta(minutes=minutes_ago)),
+        )
+    immune.commit()
+    manager.status(reference_time=_ts(later))
+
+    blocked = operator.restart_runtime_after_halt(
+        restart_reason="operator_runtime_restart",
+        notes="too early",
+        reference_time=_ts(later),
+    )
+    runtime_status = operator.runtime_status()
+    restart_history = operator.list_runtime_restart_history(limit=5)
+
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["judge_restart"]["status"] == "HALTED"
+    assert blocked["runtime_restart"]["status"] == "BLOCKED"
+    assert runtime_status["lifecycle_state"] == "HALTED"
+    assert restart_history[0]["status"] == "BLOCKED"
+
+
 def test_second_judge_deadlock_trigger_inside_guard_halts_and_keeps_fail_closed_posture(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
@@ -842,6 +1108,44 @@ def test_second_judge_deadlock_trigger_inside_guard_halts_and_keeps_fail_closed_
     assert halted_verdict.outcome.value == "BLOCK"
     assert breaker_row["action_taken"] == "FULL_SYSTEM_HALT"
     assert operator.list_judge_fallback_events(limit=5)[0]["status"] == "HALTED"
+
+
+def test_judge_deadlock_uses_persisted_task_types_not_skill_names(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    immune = db.get_connection("immune")
+    manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
+    now = _now()
+
+    for task_type, result, minutes_ago in [
+        ("planning", "BLOCK", 5),
+        ("research", "BLOCK", 4),
+        ("operations", "BLOCK", 3),
+        ("planning", "PASS", 2),
+        ("research", "BLOCK", 1),
+    ]:
+        _insert_normal_judge_verdict(
+            immune,
+            skill_name="shared_skill",
+            task_type=task_type,
+            result=result,
+            timestamp=_ts(now - datetime.timedelta(minutes=minutes_ago)),
+        )
+    immune.commit()
+
+    payload = JudgePayload(
+        session_id="deadlock-task-type-trigger",
+        skill_name="shared_skill",
+        tool_name="shared_tool",
+        task_type="finance",
+        output={"secret": "sk-trigger"},
+        expected_schema=None,
+    )
+
+    activation = manager.record_verdict(payload, judge_check(payload, load_config()), reference_time=_ts(now))
+
+    assert activation is not None
+    assert activation["status"] == "ACTIVE"
+    assert activation["distinct_task_types"] == ["finance", "operations", "planning", "research"]
 
 
 def test_research_domain_can_list_and_complete_tasks(test_data_dir):

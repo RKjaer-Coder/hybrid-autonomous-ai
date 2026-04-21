@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+from pathlib import Path
 import re
 import threading
 from typing import Any, Callable
@@ -11,8 +12,9 @@ from immune.config import load_config
 from immune.judge import judge_check
 from immune.judge_lifecycle import JudgeLifecycleManager
 from immune.sheriff import sheriff_check, trigger_deep_scan
-from immune.types import ImmuneBlockError, ImmuneConfig, JudgePayload, SheriffPayload
+from immune.types import AlertSeverity, BlockReason, CheckType, ImmuneBlockError, ImmuneConfig, ImmuneVerdict, JudgePayload, Outcome, SheriffPayload, Tier, generate_uuid_v7
 from immune.verdict_logger import VerdictLogger
+from runtime_control import RuntimeControlManager
 
 CANDIDATES = [
     ("hermes.tools.base", "execute_tool"),
@@ -67,9 +69,12 @@ def apply_immune_patch(
     if not config.bootstrap_patch_enabled:
         return True
     judge_lifecycle = None
+    runtime_control = None
     db_path = getattr(verdict_logger, "db_path", None)
     if isinstance(db_path, str):
         judge_lifecycle = JudgeLifecycleManager(db_path, config)
+        operator_db_path = str(Path(db_path).with_name("operator_digest.db"))
+        runtime_control = RuntimeControlManager(operator_db_path)
     located = _locate_dispatch()
     if located is None:
         return False
@@ -107,6 +112,29 @@ def apply_immune_patch(
 
         if not _stack_has_immune_wrapper(kwargs.get("execution_stack")):
             verdict_logger.log_bypass(skill_name, session_id, "direct_dispatch", "Missing immune wrapper")
+
+        runtime_status = None if runtime_control is None else runtime_control.status()
+        if runtime_status is not None and runtime_status["lifecycle_state"] == "HALTED":
+            active_halt = runtime_status["active_halt"]
+            jverdict = ImmuneVerdict(
+                generate_uuid_v7(),
+                CheckType.JUDGE,
+                Tier.FAST_PATH,
+                skill_name,
+                session_id,
+                Outcome.BLOCK,
+                BlockReason.INTERNAL_ERROR,
+                (
+                    "Runtime halt active; operator restart required"
+                    if active_halt is None
+                    else f"Runtime halt active ({active_halt['source']}): operator restart required"
+                ),
+                0.0,
+                AlertSeverity.SECURITY_ALERT,
+                task_type=kwargs.get("task_type") or skill_name,
+            )
+            verdict_logger.log_verdict(jverdict)
+            raise ImmuneBlockError(jverdict)
 
         output = original_fn(*args, **kwargs)
         judge_payload = JudgePayload(

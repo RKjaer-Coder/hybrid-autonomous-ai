@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from runtime_control import RuntimeControlManager
 from skills.config import IntegrationConfig
 from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
 from skills.runtime import (
@@ -415,6 +416,27 @@ def test_run_operator_workflow_installs_profile_before_final_doctor(tmp_path):
     assert any(item["step_type"] == "phase_gate_apply" for item in result.observability.telemetry_events)
     assert result.observability.system_health["heartbeat_state"] == "ACTIVE"
     assert result.observability.system_health["pending_harvests"] == 1
+
+
+def test_run_operator_workflow_fails_closed_when_runtime_is_halted(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    migrate_runtime_databases(cfg)
+    RuntimeControlManager(str(tmp_path / "data" / "operator_digest.db")).activate_halt(
+        source="MANUAL_TEST",
+        halt_reason="runtime_halt_contract_test",
+    )
+
+    rt = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+    result = run_operator_workflow(rt, config=cfg)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "runtime halted before workflow execution" in result.error
 
 
 def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypatch, capsys):

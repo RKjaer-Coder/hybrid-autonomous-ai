@@ -21,6 +21,7 @@ from immune.types import (
     Tier,
     generate_uuid_v7,
 )
+from runtime_control import RuntimeControlManager
 
 _REQUIRED_TABLES = {
     "immune_verdicts",
@@ -53,6 +54,7 @@ class JudgeLifecycleManager:
         self._config = config
         operator_db = Path(immune_db_path).with_name("operator_digest.db")
         self._operator_db_path = str(operator_db) if operator_db.exists() else None
+        self._runtime_control = None if self._operator_db_path is None else RuntimeControlManager(self._operator_db_path)
         self._available = self._verify_tables()
 
     @property
@@ -100,6 +102,7 @@ class JudgeLifecycleManager:
             0.0,
             AlertSeverity.SECURITY_ALERT,
             judge_mode=JudgeMode.NORMAL,
+            task_type=payload.task_type or payload.skill_name,
         )
 
     def record_verdict(
@@ -367,7 +370,7 @@ class JudgeLifecycleManager:
         cutoff = _to_iso(_parse_ts(now) - datetime.timedelta(seconds=self._config.judge_deadlock_window_seconds))
         rows = conn.execute(
             """
-            SELECT verdict_id, skill_name, result, timestamp
+            SELECT verdict_id, COALESCE(task_type, skill_name) AS task_type, result, timestamp
             FROM immune_verdicts
             WHERE verdict_type = 'judge_output'
               AND judge_mode = 'NORMAL'
@@ -387,7 +390,7 @@ class JudgeLifecycleManager:
             samples.append(
                 {
                     "verdict_id": current_verdict.verdict_id,
-                    "skill_name": current_payload.task_type or current_payload.skill_name,
+                    "task_type": current_payload.task_type or current_payload.skill_name,
                     "result": "PASS" if current_verdict.outcome == Outcome.PASS else current_verdict.outcome.value,
                     "timestamp": now,
                 }
@@ -403,7 +406,7 @@ class JudgeLifecycleManager:
             span_seconds = (
                 _parse_ts(samples[-1]["timestamp"]) - _parse_ts(samples[0]["timestamp"])
             ).total_seconds()
-        distinct_task_types = sorted({row["skill_name"] for row in blocked})
+        distinct_task_types = sorted({row["task_type"] for row in blocked})
         block_rate = 0.0 if total == 0 else len(blocked) / total
         return {
             "total": total,
@@ -545,6 +548,15 @@ class JudgeLifecycleManager:
             requires_human=True,
             timestamp=now,
         )
+        if self._runtime_control is not None and self._runtime_control.available:
+            self._runtime_control.activate_halt(
+                source="JUDGE_DEADLOCK",
+                trigger_event_id=event_id,
+                halt_reason=reason,
+                halt_scope="FULL_SYSTEM_HALT",
+                requires_human=True,
+                reference_time=now,
+            )
         return {
             "event_id": event_id,
             "status": "HALTED",

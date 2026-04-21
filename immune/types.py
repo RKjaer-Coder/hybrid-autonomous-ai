@@ -100,6 +100,7 @@ class ImmuneVerdict:
     latency_ms: float = 0.0
     alert_severity: AlertSeverity | None = None
     judge_mode: JudgeMode | None = None
+    task_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.outcome == Outcome.BLOCK and self.block_reason is None:
@@ -116,6 +117,8 @@ class ImmuneVerdict:
             object.__setattr__(self, "judge_mode", JudgeMode.NOT_APPLICABLE)
         elif self.judge_mode != JudgeMode.NOT_APPLICABLE:
             raise ValueError("Only Judge verdicts may set a non-default judge_mode")
+        if self.task_type is None:
+            object.__setattr__(self, "task_type", self.skill_name)
 
 
 @dataclass(frozen=True)

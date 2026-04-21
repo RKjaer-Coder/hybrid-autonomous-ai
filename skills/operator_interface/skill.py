@@ -6,9 +6,12 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from financial_router.types import JWTClaims
 from immune.config import load_config
 from immune.judge_lifecycle import JudgeLifecycleManager
+from runtime_control import RuntimeControlManager
 from skills.db_manager import DatabaseManager
+from skills.financial_router.skill import FinancialRouterSkill
 
 
 DAILY_SECTION_ORDER = [
@@ -62,10 +65,15 @@ class DigestRecord:
 class OperatorInterfaceSkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        self._financial_router = FinancialRouterSkill(db_manager)
         immune = self._db.get_connection("immune")
         self._judge_lifecycle = JudgeLifecycleManager(
             immune.execute("PRAGMA database_list").fetchone()[2],
             load_config(),
+        )
+        operator = self._db.get_connection("operator_digest")
+        self._runtime_control = RuntimeControlManager(
+            operator.execute("PRAGMA database_list").fetchone()[2]
         )
 
     def alert(
@@ -195,6 +203,86 @@ class OperatorInterfaceSkill:
         ).fetchall()
         return [self._quarantine_row_to_dict(row) for row in rows]
 
+    def list_g3_approval_requests(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+        reference_time: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._financial_router.list_g3_approval_requests(
+            limit=limit,
+            status=status,
+            reference_time=reference_time,
+        )
+
+    def review_g3_approval_request(
+        self,
+        request_id: str,
+        decision: str,
+        *,
+        operator_notes: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._financial_router.review_g3_approval_request(
+            request_id,
+            decision,
+            operator_notes=operator_notes,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "gate_response", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def dispatch_approved_paid_route(
+        self,
+        *,
+        correlation_id: str,
+        jwt_claims: dict[str, Any],
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._financial_router.dispatch_approved_paid_route(
+            correlation_id=correlation_id,
+            jwt=jwt_claims if isinstance(jwt_claims, JWTClaims) else JWTClaims(**jwt_claims),
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
+    def finalize_paid_dispatch(
+        self,
+        *,
+        correlation_id: str,
+        final_cost_usd: float,
+        provider: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        result = self._financial_router.finalize_paid_dispatch(
+            correlation_id=correlation_id,
+            final_cost_usd=final_cost_usd,
+            provider=provider,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return result
+
     def review_quarantined_response(
         self,
         quarantine_id: str,
@@ -285,6 +373,111 @@ class OperatorInterfaceSkill:
         operator.commit()
         return result
 
+    def runtime_status(self) -> dict[str, Any]:
+        return self._runtime_control.status()
+
+    def list_runtime_halt_events(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._runtime_control.list_halt_events(limit=limit, status=status)
+
+    def list_runtime_restart_history(
+        self,
+        *,
+        limit: int = 20,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._runtime_control.list_restart_history(limit=limit, status=status)
+
+    def restart_runtime_after_halt(
+        self,
+        *,
+        halt_id: str | None = None,
+        judge_event_id: str | None = None,
+        restart_reason: str = "operator_runtime_restart",
+        notes: str | None = None,
+        reference_time: str | None = None,
+    ) -> dict[str, Any]:
+        now = self._resolve_now(reference_time)
+        runtime_status = self._runtime_control.status(reference_time=now)
+        active_halt = runtime_status["active_halt"]
+        if active_halt is None:
+            raise KeyError(halt_id or "active runtime halt")
+
+        immune = self._db.get_connection("immune")
+        pending_quarantine_count = int(
+            immune.execute(
+                "SELECT COUNT(*) FROM quarantined_responses WHERE review_status = 'PENDING'"
+            ).fetchone()[0]
+        )
+        judge_status_before = self._judge_lifecycle.status(reference_time=now)
+        preflight: dict[str, Any] = {
+            "runtime_state_before": runtime_status["lifecycle_state"],
+            "halt_id": active_halt["halt_id"],
+            "halt_source": active_halt["source"],
+            "pending_quarantine_review_count": pending_quarantine_count,
+            "judge_deadlock_mode_before": judge_status_before["mode"],
+        }
+        judge_restart_result: dict[str, Any] | None = None
+        if active_halt["source"] == "JUDGE_DEADLOCK":
+            judge_restart_result = self._judge_lifecycle.restart_after_deadlock(
+                event_id=judge_event_id or active_halt["trigger_event_id"],
+                reference_time=now,
+            )
+            preflight["judge_restart_result"] = judge_restart_result
+            if judge_restart_result["status"] != "CLEARED":
+                blocked = self._runtime_control.record_blocked_restart(
+                    halt_id=halt_id or active_halt["halt_id"],
+                    restart_reason=restart_reason,
+                    preflight=preflight,
+                    notes=notes,
+                    reference_time=now,
+                )
+                return {
+                    "status": "BLOCKED",
+                    "runtime_restart": blocked,
+                    "judge_restart": judge_restart_result,
+                    "runtime_status": self._runtime_control.status(reference_time=now),
+                }
+        if active_halt["source"] == "SECURITY_CASCADE" and pending_quarantine_count:
+            preflight["blocked_reason"] = "pending_quarantine_reviews"
+            blocked = self._runtime_control.record_blocked_restart(
+                halt_id=halt_id or active_halt["halt_id"],
+                restart_reason=restart_reason,
+                preflight=preflight,
+                notes=notes,
+                reference_time=now,
+            )
+            return {
+                "status": "BLOCKED",
+                "runtime_restart": blocked,
+                "judge_restart": judge_restart_result,
+                "runtime_status": self._runtime_control.status(reference_time=now),
+            }
+
+        completed = self._runtime_control.complete_restart(
+            halt_id=halt_id or active_halt["halt_id"],
+            restart_reason=restart_reason,
+            preflight=preflight,
+            notes=notes,
+            reference_time=now,
+        )
+        operator = self._db.get_connection("operator_digest")
+        operator.execute(
+            "INSERT INTO operator_heartbeat (entry_id, interaction_type, channel, timestamp) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), "command", "CLI", now),
+        )
+        operator.commit()
+        return {
+            "status": "COMPLETED",
+            "runtime_restart": completed,
+            "judge_restart": judge_restart_result,
+            "runtime_status": self._runtime_control.status(reference_time=now),
+        }
+
     def record_heartbeat(self, interaction_type: str, channel: str = "CLI") -> str:
         entry_id = str(uuid.uuid4())
         now = self._utc_now()
@@ -325,6 +518,7 @@ class OperatorInterfaceSkill:
 
     def generate_digest(self, digest_type: str = "daily", operator_state: str | None = None) -> dict:
         now = self._utc_now()
+        self._financial_router.expire_stale_g3_requests(reference_time=now)
         effective_state = operator_state or self._operator_state(now)
         load_snapshot = self._record_operator_load_snapshot(now)
         effective_type = digest_type
@@ -539,6 +733,10 @@ class OperatorInterfaceSkill:
             if (
                 health["compound_breakers"]["recent"]
                 or health["quarantined_responses"]["pending_review_count"]
+                or health["g3_requests"]["pending_count"]
+                or health["g3_requests"]["approved_24h"]
+                or health["g3_requests"]["denied_24h"]
+                or health["g3_requests"]["expired_24h"]
                 or health["disputed_costs"]["count"]
                 or health["judge_fallback"]["count"]
                 or health["judge_deadlock"]["mode"] in {"FALLBACK", "HALTED"}
@@ -630,6 +828,19 @@ class OperatorInterfaceSkill:
             issues.append("breaker_log=" + ",".join(health["circuit_breakers"]["logged_active"]))
         if health["quarantined_responses"]["pending_review_count"]:
             issues.append(f"quarantine pending={health['quarantined_responses']['pending_review_count']}")
+        if (
+            health["g3_requests"]["pending_count"]
+            or health["g3_requests"]["approved_24h"]
+            or health["g3_requests"]["denied_24h"]
+            or health["g3_requests"]["expired_24h"]
+        ):
+            issues.append(
+                "g3="
+                + f"pending:{health['g3_requests']['pending_count']}"
+                + f"/approved24h:{health['g3_requests']['approved_24h']}"
+                + f"/denied24h:{health['g3_requests']['denied_24h']}"
+                + f"/expired24h:{health['g3_requests']['expired_24h']}"
+            )
         if health["disputed_costs"]["count"]:
             issues.append(
                 "disputed_spend="
@@ -645,6 +856,14 @@ class OperatorInterfaceSkill:
             issues.append(f"judge_deadlock fallback until={expires_at}")
         if health["judge_deadlock"]["mode"] == "HALTED":
             issues.append("judge_deadlock HALTED operator_restart_required")
+        if health["runtime_control"]["lifecycle_state"] == "HALTED":
+            active_halt = health["runtime_control"]["active_halt"]
+            if active_halt is None:
+                issues.append("runtime HALTED operator_restart_required")
+            else:
+                issues.append(f"runtime HALTED source={active_halt['source']}")
+        if health["runtime_control"]["blocked_restart_attempts"]:
+            issues.append(f"runtime_restart blocked={health['runtime_control']['blocked_restart_attempts']}")
         if health["judge_deadlock"]["review_queue"]["pending"]:
             issues.append(f"judge_review pending={health['judge_deadlock']['review_queue']['pending']}")
         if health["judge_deadlock"]["review_queue"]["blocked"]:
@@ -667,6 +886,7 @@ class OperatorInterfaceSkill:
         strategic = self._db.get_connection("strategic_memory")
         immune = self._db.get_connection("immune")
         financial = self._db.get_connection("financial_ledger")
+        g3_requests = self._financial_router.g3_request_summary(reference_time=now, recent_limit=3)
         degraded_rows = telemetry.execute(
             """
             SELECT step_type, skill, reliability_7d
@@ -762,6 +982,10 @@ class OperatorInterfaceSkill:
             """
         ).fetchone()
         judge_deadlock = self._judge_lifecycle.status(reference_time=now)
+        runtime_status = self._runtime_control.status(reference_time=now)
+        blocked_restart_attempts = len(
+            self._runtime_control.list_restart_history(limit=5, status="BLOCKED")
+        )
         stale_tasks = strategic.execute(
             "SELECT COUNT(*) FROM research_tasks WHERE status = 'STALE'"
         ).fetchone()[0]
@@ -788,6 +1012,7 @@ class OperatorInterfaceSkill:
                 "pending_review_count": int(quarantine_summary["pending_count"]),
                 "recent": [dict(row) for row in quarantined_rows],
             },
+            "g3_requests": g3_requests,
             "disputed_costs": {
                 "count": int(disputed_summary["disputed_count"]),
                 "amount_usd": float(disputed_summary["disputed_amount"]),
@@ -800,6 +1025,10 @@ class OperatorInterfaceSkill:
                 "recent": [dict(row) for row in fallback_rows],
             },
             "judge_deadlock": judge_deadlock,
+            "runtime_control": {
+                **runtime_status,
+                "blocked_restart_attempts": blocked_restart_attempts,
+            },
             "unacknowledged_t3_alerts": unacknowledged_t3,
             "research_health": {
                 "stale_tasks": stale_tasks,
@@ -1111,6 +1340,32 @@ def operator_interface_entry(action: str, **kwargs):
             limit=kwargs.get("limit", 20),
             pending_review_only=kwargs.get("pending_review_only", False),
         )
+    if action == "list_g3_approval_requests":
+        return _SKILL.list_g3_approval_requests(
+            limit=kwargs.get("limit", 20),
+            status=kwargs.get("status"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "review_g3_approval_request":
+        return _SKILL.review_g3_approval_request(
+            kwargs["request_id"],
+            kwargs["decision"],
+            operator_notes=kwargs.get("operator_notes"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "dispatch_approved_paid_route":
+        return _SKILL.dispatch_approved_paid_route(
+            correlation_id=kwargs["correlation_id"],
+            jwt_claims=kwargs["jwt_claims"],
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "finalize_paid_dispatch":
+        return _SKILL.finalize_paid_dispatch(
+            correlation_id=kwargs["correlation_id"],
+            final_cost_usd=kwargs["final_cost_usd"],
+            provider=kwargs.get("provider"),
+            reference_time=kwargs.get("reference_time"),
+        )
     if action == "review_quarantined_response":
         return _SKILL.review_quarantined_response(
             kwargs["quarantine_id"],
@@ -1129,6 +1384,26 @@ def operator_interface_entry(action: str, **kwargs):
     if action == "restart_judge_after_deadlock":
         return _SKILL.restart_judge_after_deadlock(
             event_id=kwargs.get("event_id"),
+            reference_time=kwargs.get("reference_time"),
+        )
+    if action == "runtime_status":
+        return _SKILL.runtime_status()
+    if action == "list_runtime_halt_events":
+        return _SKILL.list_runtime_halt_events(
+            limit=kwargs.get("limit", 20),
+            status=kwargs.get("status"),
+        )
+    if action == "list_runtime_restart_history":
+        return _SKILL.list_runtime_restart_history(
+            limit=kwargs.get("limit", 20),
+            status=kwargs.get("status"),
+        )
+    if action == "restart_runtime_after_halt":
+        return _SKILL.restart_runtime_after_halt(
+            halt_id=kwargs.get("halt_id"),
+            judge_event_id=kwargs.get("judge_event_id"),
+            restart_reason=kwargs.get("restart_reason", "operator_runtime_restart"),
+            notes=kwargs.get("notes"),
             reference_time=kwargs.get("reference_time"),
         )
     if action == "generate_digest":

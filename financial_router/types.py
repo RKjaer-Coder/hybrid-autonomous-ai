@@ -39,6 +39,7 @@ class G3Status(Enum):
     NOT_REQUIRED = "not_required"
     PENDING = "pending"
     APPROVED = "approved"
+    BLOCKED = "blocked"
     EXPIRED = "expired"
 
 
@@ -49,6 +50,27 @@ class CostStatus(Enum):
     ESTIMATED = "ESTIMATED"
     FINAL = "FINAL"
     DISPUTED = "DISPUTED"
+
+
+class G3RequestStatus(Enum):
+    """Durable lifecycle state for per-call G3 approval requests."""
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
+
+
+class DispatchStatus(Enum):
+    """Whether a selected paid route has actually been dispatched."""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    APPROVED_PENDING_DISPATCH = "APPROVED_PENDING_DISPATCH"
+    DISPATCHED = "DISPATCHED"
+    FINALIZED = "FINALIZED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
 
 
 @dataclass(frozen=True)

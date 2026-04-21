@@ -435,29 +435,21 @@ def route_task(
                     qualified_paid.append((model, estimated_cost, g3_path, requires_approval))
 
                 if qualified_paid:
-                    for selected_model, estimated_cost, g3_path, requires_approval in sorted(
+                    selected_model, estimated_cost, g3_path, requires_approval = sorted(
                         qualified_paid, key=lambda entry: (-entry[0].quality_score, entry[0].model_id)
-                    ):
-                        if reservation_registry is not None:
-                            reserved = reservation_registry.reserve(
-                                session_id=jwt.session_id,
-                                request_id=effective_request_id,
-                                current_spend=jwt.current_session_spend_usd,
-                                cap=jwt.max_api_spend_usd,
-                                amount=estimated_cost,
-                            )
-                        else:
-                            reserved = _DEFAULT_RESERVATIONS.reserve(
-                                session_id=jwt.session_id,
-                                request_id=effective_request_id,
-                                current_spend=jwt.current_session_spend_usd,
-                                cap=jwt.max_api_spend_usd,
-                                amount=estimated_cost,
-                            )
-                        if reserved:
-                            return RoutingDecision(RoutingTier.PAID_CLOUD, selected_model.model_id, g3_path, estimated_cost, False, _build_justification(RoutingTier.PAID_CLOUD, skipped), skipped, requires_approval, False, effective_request_id)
-                        LOGGER.warning("paid_reservation_rejected", extra={"session_id": jwt.session_id, "request_id": effective_request_id})
-                        paid_fail_reasons.append(f"{selected_model.model_id} blocked: atomic reservation rejected (cap race)")
+                    )[0]
+                    return RoutingDecision(
+                        RoutingTier.PAID_CLOUD,
+                        selected_model.model_id,
+                        g3_path,
+                        estimated_cost,
+                        False,
+                        _build_justification(RoutingTier.PAID_CLOUD, skipped),
+                        skipped,
+                        requires_approval,
+                        False,
+                        None,
+                    )
                 skipped["paid_cloud"] = "; ".join(paid_fail_reasons)
 
     sub_fallback_models = [

@@ -4,12 +4,14 @@ import sqlite3
 import sys
 import time
 import types
+from pathlib import Path
 
 from immune import judge
 from immune.bootstrap_patch import _stack_has_immune_wrapper, apply_immune_patch
 from immune.types import BlockReason, ImmuneBlockError, Outcome
 
 from immune.types import CheckType, ImmuneVerdict, Tier, generate_uuid_v7
+from runtime_control import RuntimeControlManager
 
 
 def _pass_verdict():
@@ -165,3 +167,32 @@ def test_patch_can_force_structural_judge_fallback(clean_sheriff_payload, defaul
     ).fetchone()
     assert row[0] == "FALLBACK"
     assert "judge_degraded" in row[1]
+
+
+def test_patch_blocks_execution_before_dispatch_when_runtime_halted(clean_sheriff_payload, default_config, test_db):
+    called = {"dispatch": 0}
+
+    def dispatch(*args, **kwargs):
+        called["dispatch"] += 1
+        return {"ok": True}
+
+    _install_fake(dispatch)
+    logger = VerdictLogger(test_db, default_config)
+    RuntimeControlManager(str(Path(test_db).with_name("operator_digest.db"))).activate_halt(
+        source="MANUAL_TEST",
+        halt_reason="runtime_halt_contract_test",
+    )
+    assert apply_immune_patch(lambda *_: _pass_verdict(), lambda *_: _pass_verdict(), default_config, logger)
+    try:
+        sys.modules["hermes.tools.base"].execute_tool(
+            tool_name="safe_tool",
+            arguments={},
+            skill_name="immune_system",
+            session_id=clean_sheriff_payload.session_id,
+            execution_stack="immune_system",
+        )
+    except ImmuneBlockError as exc:
+        assert "Runtime halt active" in str(exc)
+    else:
+        assert False
+    assert called["dispatch"] == 0

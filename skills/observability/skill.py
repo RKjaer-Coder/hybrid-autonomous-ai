@@ -6,8 +6,10 @@ from typing import Optional
 
 from immune.judge_lifecycle import JudgeLifecycleManager
 from immune.config import load_config
+from runtime_control import RuntimeControlManager
 from skills.append_buffer import AppendBuffer
 from skills.db_manager import DatabaseManager
+from skills.financial_router.skill import FinancialRouterSkill
 
 
 class ObservabilitySkill:
@@ -15,10 +17,15 @@ class ObservabilitySkill:
         self._db = db_manager
         self._telemetry_buffer = telemetry_buffer
         self._immune_buffer = immune_buffer
+        self._financial_router = FinancialRouterSkill(db_manager)
         immune = self._db.get_connection("immune")
         self._judge_lifecycle = JudgeLifecycleManager(
             immune.execute("PRAGMA database_list").fetchone()[2],
             load_config(),
+        )
+        operator = self._db.get_connection("operator_digest")
+        self._runtime_control = RuntimeControlManager(
+            operator.execute("PRAGMA database_list").fetchone()[2]
         )
 
     def query_immune_verdicts(
@@ -206,6 +213,9 @@ class ObservabilitySkill:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def recent_g3_approval_requests(self, limit: int = 10, status: str | None = None) -> list[dict]:
+        return self._financial_router.list_g3_approval_requests(limit=limit, status=status)
+
     def recent_fallback_judge_verdicts(self, limit: int = 10) -> list[dict]:
         return self.query_immune_verdicts(limit=limit, judge_mode="FALLBACK")
 
@@ -217,6 +227,15 @@ class ObservabilitySkill:
 
     def judge_deadlock_status(self) -> dict:
         return self._judge_lifecycle.status()
+
+    def runtime_status(self) -> dict:
+        return self._runtime_control.status()
+
+    def runtime_halt_events(self, limit: int = 10, status: str | None = None) -> list[dict]:
+        return self._runtime_control.list_halt_events(limit=limit, status=status)
+
+    def runtime_restart_history(self, limit: int = 10, status: str | None = None) -> list[dict]:
+        return self._runtime_control.list_restart_history(limit=limit, status=status)
 
     def recent_digests(self, limit: int = 5, digest_type: str | None = None) -> list[dict]:
         conn = self._db.get_connection("operator_digest")
@@ -320,6 +339,7 @@ class ObservabilitySkill:
         strategic = self._db.get_connection("strategic_memory")
         immune = self._db.get_connection("immune")
         financial = self._db.get_connection("financial_ledger")
+        g3_requests = self._financial_router.g3_request_summary(recent_limit=3)
         heartbeat = operator.execute(
             "SELECT timestamp FROM operator_heartbeat ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
@@ -360,11 +380,19 @@ class ObservabilitySkill:
             """
         ).fetchone()
         judge_deadlock = self._judge_lifecycle.status()
+        runtime_status = self._runtime_control.status()
+        blocked_restart_attempts = len(
+            self._runtime_control.list_restart_history(limit=5, status="BLOCKED")
+        )
         heartbeat_state = self._heartbeat_state(heartbeat["timestamp"]) if heartbeat is not None else "ABSENT"
         operator_load = self._operator_load_snapshot()
         if heartbeat_state != "ACTIVE":
             recommended_digest_type = "catch_up"
-        elif judge_deadlock["mode"] in {"FALLBACK", "HALTED"} or int(fallback_summary["fallback_count"] or 0):
+        elif (
+            runtime_status["lifecycle_state"] == "HALTED"
+            or judge_deadlock["mode"] in {"FALLBACK", "HALTED"}
+            or int(fallback_summary["fallback_count"] or 0)
+        ):
             recommended_digest_type = "critical_only"
         elif operator_load["critical_only_recommended"]:
             recommended_digest_type = "critical_only"
@@ -384,6 +412,7 @@ class ObservabilitySkill:
                 "pending_review_count": int(quarantine_summary["pending_count"]),
                 "recent": self.recent_quarantined_responses(limit=3, pending_review_only=True),
             },
+            "g3_requests": g3_requests,
             "disputed_costs": {
                 "count": int(disputed_summary["disputed_count"]),
                 "amount_usd": float(disputed_summary["disputed_amount"]),
@@ -396,6 +425,12 @@ class ObservabilitySkill:
                 "recent": self.recent_fallback_judge_verdicts(limit=3),
             },
             "judge_deadlock": judge_deadlock,
+            "runtime_control": {
+                **runtime_status,
+                "blocked_restart_attempts": blocked_restart_attempts,
+                "recent_halts": self.runtime_halt_events(limit=3),
+                "recent_restarts": self.runtime_restart_history(limit=3),
+            },
             "research_health": {
                 "pending_tasks": strategic.execute(
                     "SELECT COUNT(*) FROM research_tasks WHERE status = 'PENDING'"
@@ -534,6 +569,11 @@ def observability_entry(action: str, **kwargs):
         )
     if action == "recent_disputed_costs":
         return _SKILL.recent_disputed_costs(kwargs.get("limit", 10))
+    if action == "recent_g3_approval_requests":
+        return _SKILL.recent_g3_approval_requests(
+            kwargs.get("limit", 10),
+            kwargs.get("status"),
+        )
     if action == "recent_fallback_judge_verdicts":
         return _SKILL.recent_fallback_judge_verdicts(kwargs.get("limit", 10))
     if action == "recent_judge_fallback_events":
@@ -545,6 +585,18 @@ def observability_entry(action: str, **kwargs):
         )
     if action == "judge_deadlock_status":
         return _SKILL.judge_deadlock_status()
+    if action == "runtime_status":
+        return _SKILL.runtime_status()
+    if action == "runtime_halt_events":
+        return _SKILL.runtime_halt_events(
+            kwargs.get("limit", 10),
+            kwargs.get("status"),
+        )
+    if action == "runtime_restart_history":
+        return _SKILL.runtime_restart_history(
+            kwargs.get("limit", 10),
+            kwargs.get("status"),
+        )
     if action == "recent_digests":
         return _SKILL.recent_digests(kwargs.get("limit", 5), kwargs.get("digest_type"))
     if action == "reliability_dashboard":

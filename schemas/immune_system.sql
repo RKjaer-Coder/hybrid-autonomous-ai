@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS immune_verdicts (
   scan_tier TEXT NOT NULL CHECK (scan_tier IN ('fast_path', 'deep_scan')),
   session_id TEXT NOT NULL,
   skill_name TEXT NOT NULL,
+  task_type TEXT,
   result TEXT NOT NULL CHECK (result IN ('PASS', 'BLOCK', 'INCONCLUSIVE', 'TIMEOUT')),
   match_pattern TEXT,
   latency_ms INTEGER NOT NULL,

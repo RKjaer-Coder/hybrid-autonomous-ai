@@ -43,5 +43,5 @@ def test_latency_included_in_log_row():
     s = ImmuneSystemSkill(verdict_buffer=b)
     payload = SheriffPayload(session_id="s", skill_name="x", tool_name="safe", arguments={"a": 1}, raw_prompt="", source_trust_tier=4, jwt_claims={})
     s.check_sheriff(payload)
-    assert isinstance(b.rows[0][7], int)
-    assert b.rows[0][8] == "NOT_APPLICABLE"
+    assert isinstance(b.rows[0][8], int)
+    assert b.rows[0][9] == "NOT_APPLICABLE"

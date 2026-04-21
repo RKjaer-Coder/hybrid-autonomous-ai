@@ -39,6 +39,7 @@ IMMUNE_BUFFER_CONFIG = BufferConfig(
         "scan_tier",
         "session_id",
         "skill_name",
+        "task_type",
         "result",
         "match_pattern",
         "latency_ms",

@@ -134,7 +134,10 @@ class SchemaSuiteTests(unittest.TestCase):
                 count += 1
 
         with self.conn("immune_system") as im:
-            im.execute("INSERT INTO immune_verdicts VALUES (?,?,?,?,?,?,?,?,?,?)", (uid(), 'sheriff_input', 'fast_path', 'session1', 'planner', 'PASS', None, 4, now, 'NOT_APPLICABLE'))
+            im.execute(
+                "INSERT INTO immune_verdicts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (uid(), 'sheriff_input', 'fast_path', 'session1', 'planner', 'planning', 'PASS', None, 4, now, 'NOT_APPLICABLE'),
+            )
             im.execute("INSERT INTO security_alerts VALUES (?,?,?,?,?,?,?,?)", (uid(), 'jwt_failure', 'ALERT', 'detail', 'session1', 0, None, now))
             im.execute("INSERT INTO circuit_breaker_log VALUES (?,?,?,?,?,?,?,?)", (uid(), 'TOOL_FAILURE_STORM', 'ARMED', 'n failures', 'watch', 1, None, now))
             im.execute(
@@ -281,12 +284,32 @@ class SchemaSuiteTests(unittest.TestCase):
                     decision_id, task_id, project_id, session_id, chain_id, correlation_id,
                     role, route_selected, model_used, commercial_use_ok, quality_warning,
                     cost_usd, cost_status, justification, g3_required, g3_status,
-                    reservation_id, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    reservation_id, created_at, approval_request_id, dispatch_status,
+                    dispatched_at, finalized_at, final_cost_usd
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                (uid(), 'task1', project_id, 'session1', 'chain1', 'corr-1', 'Execution', 'local', 'model', 1, 0, 0.0, 'NOT_APPLICABLE', None, 0, None, None, now),
+                (
+                    'decision-1', 'task1', project_id, 'session1', 'chain1', 'corr-1',
+                    'Execution', 'local', 'model', 1, 0, 0.0, 'NOT_APPLICABLE', None, 0, None,
+                    None, now, 'request-1', 'NOT_APPLICABLE', None, None, None,
+                ),
             )
-            count += 9
+            fl.execute(
+                """
+                INSERT INTO g3_approval_requests (
+                    request_id, correlation_id, project_id, session_id, task_id,
+                    route_decision_id, gate_id, requested_model, estimated_cost_usd,
+                    justification, requested_at, expires_at, status, operator_notes, responded_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    'request-1', 'corr-1', project_id, 'session1', 'task1',
+                    'decision-1', 'gate-1', 'model', 0.5,
+                    'why not local/free/subscription/operator-prompted', now, now,
+                    'PENDING', None, None,
+                ),
+            )
+            count += 10
 
         with self.conn("operator_digest") as od:
             od.execute("INSERT INTO digest_history VALUES (?,?,?,?,?,?,?,?,?)", (uid(), 'daily', 'content', json.dumps([1, 2]), 100, 'ACTIVE', now, None, now))

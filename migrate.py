@@ -72,7 +72,7 @@ EXPECTED_OBJECTS = {
     "financial_ledger": {
         "tables": {
             "projects", "phases", "kill_signals", "kill_recommendations", "assets", "revenue_records",
-            "cost_records", "treasury", "routing_decisions",
+            "cost_records", "treasury", "routing_decisions", "g3_approval_requests",
         },
         "indexes": {
             "idx_projects_status", "idx_projects_opportunity_id", "idx_projects_income_mechanism", "idx_phases_project_sequence",
@@ -80,16 +80,31 @@ EXPECTED_OBJECTS = {
             "idx_revenue_records_project_period_start", "idx_cost_records_project_created", "idx_cost_records_cost_category",
             "idx_cost_records_correlation_id", "idx_cost_records_cost_status", "idx_treasury_created_at",
             "idx_treasury_entry_type", "idx_routing_decisions_role_created", "idx_routing_decisions_route_selected",
-            "idx_routing_decisions_correlation_id", "idx_routing_decisions_cost_status",
+            "idx_routing_decisions_correlation_id", "idx_routing_decisions_approval_request_id",
+            "idx_routing_decisions_dispatch_status", "idx_routing_decisions_cost_status",
+            "idx_g3_approval_requests_correlation_id", "idx_g3_approval_requests_status_requested",
+            "idx_g3_approval_requests_expires_at", "idx_g3_approval_requests_project_status",
         },
     },
     "operator_digest": {
-        "tables": {"digest_history", "alert_log", "harvest_requests", "gate_log", "operator_heartbeat", "operator_load_tracking"},
+        "tables": {
+            "digest_history",
+            "alert_log",
+            "harvest_requests",
+            "gate_log",
+            "operator_heartbeat",
+            "operator_load_tracking",
+            "runtime_control_state",
+            "runtime_halt_events",
+            "runtime_restart_history",
+        },
         "indexes": {
             "idx_alert_log_tier_created", "idx_alert_log_type_created", "idx_harvest_requests_status_expires",
             "idx_harvest_requests_priority_status", "idx_harvest_requests_task_id", "idx_gate_log_status",
             "idx_gate_log_type_created", "idx_gate_log_project_id", "idx_operator_heartbeat_timestamp_desc",
-            "idx_operator_load_tracking_week_start",
+            "idx_operator_load_tracking_week_start", "idx_runtime_halt_events_status_created",
+            "idx_runtime_halt_events_source_created", "idx_runtime_restart_history_status_requested",
+            "idx_runtime_restart_history_halt_requested",
         },
     },
 }
@@ -123,6 +138,7 @@ def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None
             "judge_mode",
             "judge_mode TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (judge_mode IN ('NOT_APPLICABLE','NORMAL','FALLBACK'))",
         )
+        _ensure_column(conn, "immune_verdicts", "task_type", "task_type TEXT")
         if "immune_verdicts" in tables:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_immune_verdicts_judge_mode_timestamp ON immune_verdicts(judge_mode, timestamp)"
@@ -140,12 +156,32 @@ def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None
         _ensure_column(conn, "routing_decisions", "project_id", "project_id TEXT")
         _ensure_column(conn, "routing_decisions", "session_id", "session_id TEXT")
         _ensure_column(conn, "routing_decisions", "correlation_id", "correlation_id TEXT")
+        _ensure_column(conn, "routing_decisions", "approval_request_id", "approval_request_id TEXT")
+        _ensure_column(
+            conn,
+            "routing_decisions",
+            "dispatch_status",
+            "dispatch_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (dispatch_status IN ('NOT_APPLICABLE','AWAITING_APPROVAL','APPROVED_PENDING_DISPATCH','DISPATCHED','FINALIZED','DENIED','EXPIRED'))",
+        )
+        _ensure_column(conn, "routing_decisions", "dispatched_at", "dispatched_at TEXT")
+        _ensure_column(conn, "routing_decisions", "finalized_at", "finalized_at TEXT")
+        _ensure_column(conn, "routing_decisions", "final_cost_usd", "final_cost_usd REAL")
         _ensure_column(
             conn,
             "routing_decisions",
             "cost_status",
             "cost_status TEXT NOT NULL DEFAULT 'NOT_APPLICABLE' CHECK (cost_status IN ('NOT_APPLICABLE','ESTIMATED','FINAL','DISPUTED'))",
         )
+        if "routing_decisions" in {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_routing_decisions_approval_request_id ON routing_decisions(approval_request_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_routing_decisions_dispatch_status ON routing_decisions(dispatch_status, created_at)"
+            )
 
 
 def _schema_hash(schema_path: Path) -> str:

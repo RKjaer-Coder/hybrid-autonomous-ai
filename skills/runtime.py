@@ -18,6 +18,7 @@ from financial_router.types import BudgetState, JWTClaims, ModelInfo, TaskMetada
 from immune.patterns.policy_signatures import CONSTRUCTION_ALLOWLIST
 from immune.types import JudgePayload, Outcome, SheriffPayload, generate_uuid_v7
 from migrate import SCHEMAS, apply_schema, verify_database
+from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig
 from skills.db_manager import CANONICAL_DATABASES, DatabaseManager
@@ -415,8 +416,8 @@ def _persist_immune_verdict(config: IntegrationConfig, verdict: Any, latency_ms:
             """
             INSERT OR IGNORE INTO immune_verdicts (
                 verdict_id, verdict_type, scan_tier, session_id, skill_name,
-                result, match_pattern, latency_ms, judge_mode, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                task_type, result, match_pattern, latency_ms, judge_mode, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 verdict.verdict_id,
@@ -424,6 +425,7 @@ def _persist_immune_verdict(config: IntegrationConfig, verdict: Any, latency_ms:
                 verdict.tier.value,
                 verdict.session_id,
                 verdict.skill_name,
+                verdict.task_type,
                 verdict.outcome.value,
                 verdict.block_reason.value if verdict.block_reason else verdict.block_detail,
                 int(latency_ms),
@@ -1364,6 +1366,19 @@ def run_operator_workflow(
             observability=observability,
             doctor=doctor,
             error=error,
+        )
+
+    runtime_control = RuntimeControlManager(str(Path(resolved.data_dir) / "operator_digest.db"))
+    runtime_status = runtime_control.status()
+    if runtime_status["lifecycle_state"] == "HALTED":
+        active_halt = runtime_status["active_halt"]
+        return _fail(
+            "runtime halted before workflow execution"
+            if active_halt is None
+            else (
+                "runtime halted before workflow execution: "
+                f"{active_halt['source']} ({active_halt['halt_reason']})"
+            )
         )
 
     heartbeat = tool_registry.invoke_tool(
