@@ -12,6 +12,7 @@ from skills.hermes_interfaces import HermesSessionContext, MockHermesRuntime
 from skills.runtime import (
     VERSION_DRIFT_NOTE,
     ExternalCommandResult,
+    _symlink_skill_directory,
     assess_hermes_readiness,
     build_mac_studio_day_one_handoff,
     bootstrap_stack,
@@ -759,6 +760,23 @@ def test_build_mac_studio_day_one_handoff_writes_handoff_bundle(tmp_path):
     assert "--evidence-factory" in handoff_text
 
 
+def test_contract_harness_can_repeat_on_warmed_runtime(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    runtime = MockHermesRuntime(data_dir=str(tmp_path / "data"))
+
+    first = exercise_hermes_contract(config=cfg, tool_registry=runtime)
+    second = exercise_hermes_contract(config=cfg, tool_registry=runtime)
+
+    assert first.ok is True
+    assert second.ok is True
+    assert not second.issues
+
+
 def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
@@ -785,3 +803,54 @@ def test_runtime_main_bootstrap_live_flag_executes_bootstrap(tmp_path, monkeypat
     assert exit_code == 0
     assert "bootstrap ok" in output
     assert "session_id=" in output
+
+
+def test_runtime_main_reports_runtime_setup_failure_cleanly(tmp_path, monkeypatch, capsys):
+    def _boom(*args, **kwargs):
+        raise RuntimeError(
+            f"cannot create runtime directory '{tmp_path / 'blocked'}' (Operation not permitted); "
+            "choose a writable path with --data-dir"
+        )
+
+    monkeypatch.setattr("skills.runtime.install_runtime_profile", _boom)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--evidence-factory",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "runtime setup failed:" in output
+    assert "choose a writable path with --data-dir" in output
+
+
+def test_symlink_skill_directory_tolerates_racy_existing_link(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    dest = tmp_path / "dest"
+    original = Path.symlink_to
+
+    def _racy_symlink(self, target, target_is_directory=False):
+        original(self, target, target_is_directory=target_is_directory)
+        raise FileExistsError("simulated race")
+
+    monkeypatch.setattr(Path, "symlink_to", _racy_symlink)
+
+    _symlink_skill_directory(source, dest)
+
+    assert dest.is_symlink()
+    assert dest.resolve() == source.resolve()

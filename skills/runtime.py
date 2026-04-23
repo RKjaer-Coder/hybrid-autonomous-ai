@@ -1241,20 +1241,50 @@ def _symlink_skill_directory(source: Path, dest: Path) -> None:
         dest.unlink()
     elif dest.exists():
         raise FileExistsError(f"Refusing to replace non-symlink path: {dest}")
-    dest.symlink_to(source, target_is_directory=True)
+    try:
+        dest.symlink_to(source, target_is_directory=True)
+    except FileExistsError:
+        if dest.is_symlink() and dest.resolve() == source.resolve():
+            return
+        raise
+
+
+def _next_contract_harness_base_time(immune_db_path: Path, guard_hours: int) -> datetime.datetime:
+    base_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    if not immune_db_path.is_file():
+        return base_time
+    with sqlite3.connect(immune_db_path) as conn:
+        row = conn.execute("SELECT MAX(started_at) FROM judge_fallback_events").fetchone()
+    latest = row[0] if row is not None else None
+    if not latest:
+        return base_time
+    latest_started = datetime.datetime.fromisoformat(str(latest))
+    if latest_started.tzinfo is None:
+        latest_started = latest_started.replace(tzinfo=datetime.timezone.utc)
+    else:
+        latest_started = latest_started.astimezone(datetime.timezone.utc)
+    candidate = latest_started + datetime.timedelta(hours=guard_hours, seconds=5)
+    return candidate if candidate > base_time else base_time
 
 
 def prepare_runtime_directories(config: IntegrationConfig) -> IntegrationConfig:
     """Resolve and create the filesystem layout expected by the integration layer."""
     resolved = _normalize_runtime_layout(config).resolve_paths()
-    for raw_path in (
-        resolved.data_dir,
-        resolved.skills_dir,
-        resolved.checkpoints_dir,
-        resolved.alerts_dir,
-        str(_runtime_logs_dir(resolved)),
-    ):
-        Path(raw_path).mkdir(parents=True, exist_ok=True)
+    path_hints = (
+        (resolved.data_dir, "--data-dir"),
+        (resolved.skills_dir, "--skills-dir"),
+        (resolved.checkpoints_dir, "--checkpoints-dir"),
+        (resolved.alerts_dir, "--alerts-dir"),
+        (str(_runtime_logs_dir(resolved)), "--data-dir"),
+    )
+    for raw_path, flag in path_hints:
+        try:
+            Path(raw_path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot create runtime directory '{raw_path}' ({exc.strerror or exc}); "
+                f"choose a writable path with {flag}"
+            ) from exc
     return resolved
 
 
@@ -1668,7 +1698,10 @@ def exercise_hermes_contract(
 
         immune_db_path = Path(resolved.data_dir) / "immune_system.db"
         judge_lifecycle = JudgeLifecycleManager(str(immune_db_path), load_config())
-        base_time = datetime.datetime(2026, 4, 21, 12, 0, tzinfo=datetime.timezone.utc)
+        base_time = _next_contract_harness_base_time(
+            immune_db_path,
+            judge_lifecycle._config.judge_deadlock_guard_hours,
+        )
         deadlock_task_types = ["analysis", "routing", "operator_interface", "analysis"]
         active_event_id: str | None = None
         with sqlite3.connect(immune_db_path) as conn:
@@ -3850,6 +3883,19 @@ def main() -> int:
         profile_name=args.profile_name,
     )
     runtime = MockHermesRuntime(data_dir=str(Path(args.data_dir).expanduser()))
+    try:
+        return _main_impl(args, parser, config, runtime)
+    except RuntimeError as exc:
+        print(f"runtime setup failed: {exc}")
+        return 1
+
+
+def _main_impl(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    config: IntegrationConfig,
+    runtime: MockHermesRuntime,
+) -> int:
 
     if args.install_profile:
         result = install_runtime_profile(config, repo_root=args.repo_root)
