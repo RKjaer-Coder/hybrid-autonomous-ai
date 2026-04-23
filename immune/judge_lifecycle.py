@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from typing import Any
 
+from harness_variants import HarnessVariantManager
 from immune.judge import judge_check
 from immune.types import (
     AlertSeverity,
@@ -52,6 +53,7 @@ class JudgeLifecycleManager:
     def __init__(self, immune_db_path: str, config: ImmuneConfig):
         self._immune_db_path = immune_db_path
         self._config = config
+        self._harness_variants = HarnessVariantManager(str(Path(immune_db_path).with_name("telemetry.db")))
         operator_db = Path(immune_db_path).with_name("operator_digest.db")
         self._operator_db_path = str(operator_db) if operator_db.exists() else None
         self._runtime_control = None if self._operator_db_path is None else RuntimeControlManager(self._operator_db_path)
@@ -466,13 +468,31 @@ class JudgeLifecycleManager:
             requires_human=False,
             timestamp=now,
         )
-        return {
+        result = {
             "event_id": event_id,
             "status": "ACTIVE",
             "expires_at": expires_at,
             "block_rate": metrics["block_rate"],
             "distinct_task_types": metrics["distinct_task_types"],
         }
+        self._log_trace(
+            task_id=event_id,
+            role="judge_deadlock_fallback_activation",
+            action_name="activate_fallback",
+            intent_goal=f"Activate judge fallback for deadlock event {event_id}.",
+            payload={**result, "operator_alert_id": alert_id},
+            context_assembled=(
+                f"block_rate={metrics['block_rate']:.3f}; blocked={metrics['blocked']}/{metrics['total']}; "
+                f"distinct_task_types={','.join(metrics['distinct_task_types']) or 'none'}; expires_at={expires_at}"
+            ),
+            judge_verdict="PASS",
+            judge_reasoning="Judge deadlock fallback activated and routed to failure-audit evidence.",
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=0.0,
+            created_at=now,
+        )
+        return result
 
     def _halt_locked(
         self,
@@ -548,8 +568,9 @@ class JudgeLifecycleManager:
             requires_human=True,
             timestamp=now,
         )
+        runtime_halt = None
         if self._runtime_control is not None and self._runtime_control.available:
-            self._runtime_control.activate_halt(
+            runtime_halt = self._runtime_control.activate_halt(
                 source="JUDGE_DEADLOCK",
                 trigger_event_id=event_id,
                 halt_reason=reason,
@@ -557,12 +578,30 @@ class JudgeLifecycleManager:
                 requires_human=True,
                 reference_time=now,
             )
-        return {
+        result = {
             "event_id": event_id,
             "status": "HALTED",
             "block_rate": metrics["block_rate"],
             "distinct_task_types": metrics["distinct_task_types"],
         }
+        self._log_trace(
+            task_id=event_id,
+            role="judge_deadlock_halt",
+            action_name="activate_halt",
+            intent_goal=f"Halt runtime for judge deadlock event {event_id}.",
+            payload={**result, "halt_reason": reason, "prior_event_id": prior_event_id, "runtime_halt": runtime_halt},
+            context_assembled=(
+                f"reason={reason}; block_rate={metrics['block_rate']:.3f}; blocked={metrics['blocked']}/{metrics['total']}; "
+                f"distinct_task_types={','.join(metrics['distinct_task_types']) or 'none'}"
+            ),
+            judge_verdict="FAIL",
+            judge_reasoning="Judge deadlock persisted through the guard window and escalated to a full runtime halt.",
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=0.0,
+            created_at=now,
+        )
+        return result
 
     def _clear_locked(self, conn: sqlite3.Connection, event_id: str, now: str, *, reason: str) -> None:
         conn.execute(
@@ -576,6 +615,24 @@ class JudgeLifecycleManager:
             (now, reason, event_id),
         )
         self._run_retroactive_reviews_locked(conn, event_id, now)
+        queue = self._review_queue_summary_locked(conn, event_id)
+        self._log_trace(
+            task_id=event_id,
+            role="judge_deadlock_clear",
+            action_name="clear_deadlock",
+            intent_goal=f"Clear judge deadlock event {event_id}.",
+            payload={"event_id": event_id, "status": "CLEARED", "reason": reason, "review_queue": queue},
+            context_assembled=(
+                f"event_id={event_id}; reason={reason}; "
+                f"pending_reviews={queue['pending']}; blocked_reviews={queue['blocked']}; passed_reviews={queue['passed']}"
+            ),
+            judge_verdict="PASS",
+            judge_reasoning="Judge deadlock lifecycle cleared and queued reviews were reconciled.",
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=0.0,
+            created_at=now,
+        )
 
     def _enqueue_review_locked(
         self,
@@ -585,6 +642,7 @@ class JudgeLifecycleManager:
         verdict: ImmuneVerdict,
         now: str,
     ) -> None:
+        total_changes = conn.total_changes
         conn.execute(
             """
             INSERT OR IGNORE INTO judge_fallback_review_queue (
@@ -614,6 +672,31 @@ class JudgeLifecycleManager:
                 None,
             ),
         )
+        if conn.total_changes > total_changes:
+            self._log_trace(
+                task_id=verdict.verdict_id,
+                role="judge_deadlock_review_enqueue",
+                action_name="enqueue_fallback_review",
+                intent_goal=f"Queue retroactive judge review for fallback verdict {verdict.verdict_id}.",
+                payload={
+                    "event_id": event_id,
+                    "source_verdict_id": verdict.verdict_id,
+                    "session_id": payload.session_id,
+                    "skill_name": payload.skill_name,
+                    "tool_name": payload.tool_name,
+                    "task_type": payload.task_type or payload.skill_name,
+                },
+                context_assembled=(
+                    f"event_id={event_id}; session_id={payload.session_id}; "
+                    f"task_type={payload.task_type or payload.skill_name}; judge_mode={verdict.judge_mode.value}"
+                ),
+                judge_verdict="PASS",
+                judge_reasoning="Fallback pass was queued for retroactive strict-judge review.",
+                training_eligible=False,
+                retention_class="FAILURE_AUDIT",
+                outcome_score=0.0,
+                created_at=now,
+            )
 
     def _run_retroactive_reviews_locked(self, conn: sqlite3.Connection, event_id: str, now: str) -> None:
         rows = conn.execute(
@@ -660,6 +743,33 @@ class JudgeLifecycleManager:
                     review.block_reason.value if review.block_reason else review.block_detail,
                     row["queue_id"],
                 ),
+            )
+            review_status = "PASS" if review.outcome == Outcome.PASS else "BLOCK"
+            self._log_trace(
+                task_id=row["queue_id"],
+                role="judge_deadlock_retro_review",
+                action_name="run_retroactive_review",
+                intent_goal=f"Run retroactive judge review for fallback queue item {row['queue_id']}.",
+                payload={
+                    "event_id": event_id,
+                    "queue_id": row["queue_id"],
+                    "session_id": row["session_id"],
+                    "skill_name": row["skill_name"],
+                    "tool_name": row["tool_name"],
+                    "review_verdict_id": review.verdict_id,
+                    "review_status": review_status,
+                    "review_outcome": review.outcome.value,
+                },
+                context_assembled=(
+                    f"event_id={event_id}; session_id={row['session_id']}; "
+                    f"task_type={row['task_type']}; review_status={review_status}"
+                ),
+                judge_verdict="PASS" if review.outcome == Outcome.PASS else "FAIL",
+                judge_reasoning=review.block_detail or "Retroactive judge review passed under strict mode.",
+                training_eligible=False,
+                retention_class="FAILURE_AUDIT",
+                outcome_score=1.0 if review.outcome == Outcome.PASS else 0.0,
+                created_at=now,
             )
 
     def _review_queue_summary_locked(self, conn: sqlite3.Connection, event_id: str | None) -> dict[str, Any]:
@@ -750,6 +860,41 @@ class JudgeLifecycleManager:
         except Exception:
             return None
         return alert_id
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        judge_verdict: str,
+        judge_reasoning: str,
+        training_eligible: bool,
+        retention_class: str,
+        outcome_score: float,
+        created_at: str,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="immune_system",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=None,
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+            training_eligible=training_eligible,
+            retention_class=retention_class,
+            outcome_score=outcome_score,
+            created_at=created_at,
+        )
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:

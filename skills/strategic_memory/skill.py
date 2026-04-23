@@ -6,6 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from harness_variants import HarnessVariantManager
 from skills.db_manager import DatabaseManager
 
 
@@ -49,6 +50,7 @@ class IntelligenceBriefRecord:
 class StrategicMemorySkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        self._harness_variants = HarnessVariantManager(str(db_manager.data_dir / "telemetry.db"))
 
     def write_brief(
         self,
@@ -183,6 +185,28 @@ class StrategicMemorySkill:
         if source_diversity_hold:
             self._record_quality_signal(conn, brief_id, signal="incomplete", missing_dimension="source_diversity")
         conn.commit()
+        self._log_trace(
+            task_id=task_id,
+            role="strategic_memory_brief_write",
+            action_name="write_brief",
+            intent_goal=f"Persist intelligence brief {brief_id} for research task {task_id}.",
+            payload={
+                "brief_id": brief_id,
+                "task_id": task_id,
+                "domain": domain,
+                "actionability": effective_actionability,
+                "action_type": action_type,
+                "quality_warning": quality_warning,
+                "source_diversity_hold": source_diversity_hold,
+                "spawned_tasks": spawned_tasks_list,
+                "spawned_opportunity_id": spawned_opportunity_id,
+            },
+            context_assembled=(
+                f"source={source}; depth={depth_tier}; urgency={urgency}; "
+                f"trust_tier={trust_tier}; title={title}"
+            ),
+            retrieval_queries=list(dict.fromkeys([*source_urls_list, *(provenance_links or [])])),
+        )
         return brief_id
 
     def read_brief(self, brief_id: str) -> dict[str, Any]:
@@ -263,6 +287,21 @@ class StrategicMemorySkill:
             raise KeyError(brief_id)
         self._record_quality_signal(conn, brief_id, signal=signal, missing_dimension=missing_dimension, verdict_id=verdict_id)
         conn.commit()
+        brief = self.read_brief(brief_id)
+        self._log_trace(
+            task_id=brief["task_id"],
+            role="brief_quality_signal",
+            action_name="record_quality_signal",
+            intent_goal=f"Persist brief quality signal {signal} for brief {brief_id}.",
+            payload={
+                "brief_id": brief_id,
+                "signal": signal,
+                "missing_dimension": missing_dimension,
+                "verdict_id": verdict_id,
+            },
+            context_assembled=f"actionability={brief['actionability']}; depth={brief['depth_tier']}; title={brief['title']}",
+            retrieval_queries=list(dict.fromkeys([*brief["source_urls"], *brief["provenance_links"]])),
+        )
         return {
             "brief_id": brief_id,
             "signal": signal,
@@ -330,7 +369,7 @@ class StrategicMemorySkill:
                     opportunity_id=opportunity_id,
                 )
             )
-        return {
+        result = {
             "brief_id": brief_id,
             "task_id": brief["task_id"],
             "actionability": brief["actionability"],
@@ -338,6 +377,27 @@ class StrategicMemorySkill:
             "operator_state": operator_state,
             "actions": actions,
         }
+        self._log_trace(
+            task_id=brief["task_id"],
+            role="strategic_memory_routing",
+            action_name="route_brief",
+            intent_goal=f"Route intelligence brief {brief_id} into downstream governance and execution surfaces.",
+            payload=result,
+            context_assembled=(
+                f"actionability={brief['actionability']}; action_type={brief['action_type']}; "
+                f"operator_state={operator_state}; include_council_review={include_council_review}"
+            ),
+            retrieval_queries=list(
+                dict.fromkeys(
+                    [
+                        *brief["source_urls"],
+                        *brief["provenance_links"],
+                        *brief["related_brief_ids"],
+                    ]
+                )
+            ),
+        )
+        return result
 
     def _record_quality_signal(
         self,
@@ -802,6 +862,34 @@ class StrategicMemorySkill:
         if confidence > 0.80 and len(source_types) < 2:
             return True
         return False
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        retrieval_queries: list[str] | None = None,
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="strategic_memory",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=retrieval_queries,
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+        )
 
     @staticmethod
     def _utc_now() -> str:

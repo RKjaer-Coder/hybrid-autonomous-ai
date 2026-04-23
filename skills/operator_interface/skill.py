@@ -135,11 +135,20 @@ class OperatorInterfaceSkill:
             (str(uuid.uuid4()), "message", "CLI", now),
         )
         conn.commit()
-        return {
+        result = {
             "alert_id": alert_id,
             "acknowledged": True,
             "acknowledged_at": now if not bool(row["acknowledged"]) else None,
         }
+        self._log_trace(
+            task_id=alert_id,
+            role="operator_alert_acknowledgement",
+            action_name="acknowledge_alert",
+            intent_goal=f"Acknowledge operator alert {alert_id}.",
+            payload=result,
+            context_assembled=f"alert_id={alert_id}; previously_acknowledged={bool(row['acknowledged'])}",
+        )
+        return result
 
     def list_alerts(
         self,
@@ -348,7 +357,29 @@ class OperatorInterfaceSkill:
             (quarantine_id,),
         ).fetchone()
         assert updated is not None
-        return self._quarantine_row_to_dict(updated)
+        result = self._quarantine_row_to_dict(updated)
+        positive = normalized in {"REPROCESS", "REPROCESSED"}
+        self._log_trace(
+            task_id=result["task_id"] or quarantine_id,
+            role="operator_quarantine_review",
+            action_name="review_quarantined_response",
+            intent_goal=f"Review quarantined response {quarantine_id} with decision {normalized}.",
+            payload=result,
+            context_assembled=(
+                f"correlation_id={result['correlation_id']}; decision={normalized}; "
+                f"review_digest_id={review_digest_id}"
+            ),
+            judge_verdict="PASS" if positive else "FAIL",
+            judge_reasoning=(
+                "Operator approved follow-up processing for quarantined response."
+                if positive
+                else "Operator discarded quarantined response."
+            ),
+            training_eligible=positive,
+            retention_class="STANDARD" if positive else "FAILURE_AUDIT",
+            outcome_score=1.0 if positive else 0.0,
+        )
+        return result
 
     def list_judge_fallback_events(self, *, limit: int = 20) -> list[dict]:
         return self._judge_lifecycle.list_events(limit=limit)
@@ -378,6 +409,23 @@ class OperatorInterfaceSkill:
             (str(uuid.uuid4()), "command", "CLI", now),
         )
         operator.commit()
+        self._log_trace(
+            task_id=result["event_id"],
+            role="operator_judge_deadlock_restart",
+            action_name="restart_judge_after_deadlock",
+            intent_goal=f"Attempt operator restart for judge deadlock event {result['event_id']}.",
+            payload=result,
+            context_assembled=f"requested_event_id={event_id or result['event_id']}; status={result['status']}",
+            judge_verdict="PASS" if result["status"] == "CLEARED" else "FAIL",
+            judge_reasoning=(
+                "Judge deadlock cleared and fallback mode exited."
+                if result["status"] == "CLEARED"
+                else "Judge restart requested but deadlock persisted."
+            ),
+            training_eligible=result["status"] == "CLEARED",
+            retention_class="STANDARD" if result["status"] == "CLEARED" else "FAILURE_AUDIT",
+            outcome_score=1.0 if result["status"] == "CLEARED" else 0.0,
+        )
         return result
 
     def runtime_status(self) -> dict[str, Any]:
@@ -480,12 +528,29 @@ class OperatorInterfaceSkill:
                     notes=notes,
                     reference_time=now,
                 )
-                return {
+                result = {
                     "status": "BLOCKED",
                     "runtime_restart": blocked,
                     "judge_restart": judge_restart_result,
                     "runtime_status": self._runtime_control.status(reference_time=now),
                 }
+                self._log_trace(
+                    task_id=blocked["restart_id"],
+                    role="operator_runtime_restart",
+                    action_name="restart_runtime_after_halt",
+                    intent_goal=f"Attempt runtime restart for halt {blocked['halt_id']} while judge deadlock persisted.",
+                    payload=result,
+                    context_assembled=(
+                        f"halt_id={blocked['halt_id']}; restart_reason={restart_reason}; "
+                        f"judge_restart_status={judge_restart_result['status']}"
+                    ),
+                    judge_verdict="FAIL",
+                    judge_reasoning="Runtime restart blocked because judge deadlock remained active.",
+                    training_eligible=False,
+                    retention_class="FAILURE_AUDIT",
+                    outcome_score=0.0,
+                )
+                return result
         if active_halt["source"] == "SECURITY_CASCADE" and pending_quarantine_count:
             preflight["blocked_reason"] = "pending_quarantine_reviews"
             blocked = self._runtime_control.record_blocked_restart(
@@ -495,12 +560,29 @@ class OperatorInterfaceSkill:
                 notes=notes,
                 reference_time=now,
             )
-            return {
+            result = {
                 "status": "BLOCKED",
                 "runtime_restart": blocked,
                 "judge_restart": judge_restart_result,
                 "runtime_status": self._runtime_control.status(reference_time=now),
             }
+            self._log_trace(
+                task_id=blocked["restart_id"],
+                role="operator_runtime_restart",
+                action_name="restart_runtime_after_halt",
+                intent_goal=f"Attempt runtime restart for halt {blocked['halt_id']} while quarantine review remained pending.",
+                payload=result,
+                context_assembled=(
+                    f"halt_id={blocked['halt_id']}; restart_reason={restart_reason}; "
+                    f"pending_quarantine_review_count={pending_quarantine_count}"
+                ),
+                judge_verdict="FAIL",
+                judge_reasoning="Runtime restart blocked because quarantine review was still pending.",
+                training_eligible=False,
+                retention_class="FAILURE_AUDIT",
+                outcome_score=0.0,
+            )
+            return result
 
         completed = self._runtime_control.complete_restart(
             halt_id=halt_id or active_halt["halt_id"],
@@ -515,12 +597,29 @@ class OperatorInterfaceSkill:
             (str(uuid.uuid4()), "command", "CLI", now),
         )
         operator.commit()
-        return {
+        result = {
             "status": "COMPLETED",
             "runtime_restart": completed,
             "judge_restart": judge_restart_result,
             "runtime_status": self._runtime_control.status(reference_time=now),
         }
+        self._log_trace(
+            task_id=completed["restart_id"],
+            role="operator_runtime_restart",
+            action_name="restart_runtime_after_halt",
+            intent_goal=f"Restart runtime after halt {completed['halt_id']}.",
+            payload=result,
+            context_assembled=(
+                f"halt_id={completed['halt_id']}; restart_reason={restart_reason}; "
+                f"runtime_state_after={result['runtime_status']['lifecycle_state']}"
+            ),
+            judge_verdict="PASS",
+            judge_reasoning="Runtime restart completed and halt was cleared.",
+            training_eligible=True,
+            retention_class="STANDARD",
+            outcome_score=1.0,
+        )
+        return result
 
     def list_execution_traces(
         self,
@@ -653,6 +752,9 @@ class OperatorInterfaceSkill:
                 traces_evaluated=traces_evaluated,
                 compute_cost_cu=compute_cost_cu,
                 eval_duration_ms=eval_duration_ms,
+                replay_readiness_status="READY_FOR_BROADER_REPLAY",
+                replay_readiness_blockers=[],
+                operator_acknowledged_below_threshold=False,
                 created_at=now,
             ),
             reference_time=now,
@@ -674,9 +776,38 @@ class OperatorInterfaceSkill:
         minimum_known_bad_traces: int = 1,
         known_bad_score_threshold: float = 0.35,
         per_trace_cost_cu: float = 0.05,
+        operator_acknowledged_below_threshold: bool = False,
         reference_time: str | None = None,
     ) -> dict[str, Any]:
         now = self._resolve_now(reference_time)
+        replay_readiness = self._harness_variants.replay_readiness_summary()
+        alert_id: str | None = None
+        if replay_readiness["available"] and replay_readiness["status"] != "READY_FOR_BROADER_REPLAY":
+            blocker_text = ", ".join(replay_readiness["blockers"])
+            if not operator_acknowledged_below_threshold:
+                alert_id = self.alert(
+                    "T2",
+                    "REPLAY_READINESS_ACK_REQUIRED",
+                    (
+                        "Replay evaluation blocked below activation threshold for "
+                        f"{variant_id}: {blocker_text}"
+                    ),
+                    reference_time=now,
+                )
+                raise ValueError(
+                    "Replay readiness below activation threshold; set "
+                    "`operator_acknowledged_below_threshold=True` to proceed: "
+                    + blocker_text
+                )
+            alert_id = self.alert(
+                "T2",
+                "REPLAY_READINESS_OVERRIDE",
+                (
+                    "Operator acknowledged narrow replay below activation threshold for "
+                    f"{variant_id}: {blocker_text}"
+                ),
+                reference_time=now,
+            )
         result = self._harness_variants.evaluate_variant_from_traces(
             variant_id,
             sample_size=sample_size,
@@ -684,6 +815,7 @@ class OperatorInterfaceSkill:
             minimum_known_bad_traces=minimum_known_bad_traces,
             known_bad_score_threshold=known_bad_score_threshold,
             per_trace_cost_cu=per_trace_cost_cu,
+            allow_below_activation_threshold=operator_acknowledged_below_threshold,
             reference_time=now,
         )
         operator = self._db.get_connection("operator_digest")
@@ -692,6 +824,9 @@ class OperatorInterfaceSkill:
             (str(uuid.uuid4()), "command", "CLI", now),
         )
         operator.commit()
+        result["replay_readiness"] = replay_readiness
+        if alert_id is not None:
+            result["operator_alert_id"] = alert_id
         return result
 
     def record_heartbeat(self, interaction_type: str, channel: str = "CLI") -> str:
@@ -727,10 +862,19 @@ class OperatorInterfaceSkill:
             (str(uuid.uuid4()), "digest_ack", "CLI", now),
         )
         conn.commit()
-        return {
+        result = {
             "digest_id": digest_id,
             "acknowledged_at": now if row["acknowledged_at"] is None else row["acknowledged_at"],
         }
+        self._log_trace(
+            task_id=digest_id,
+            role="operator_digest_acknowledgement",
+            action_name="acknowledge_digest",
+            intent_goal=f"Acknowledge digest {digest_id}.",
+            payload=result,
+            context_assembled=f"digest_id={digest_id}; first_ack={row['acknowledged_at'] is None}",
+        )
+        return result
 
     def generate_digest(self, digest_type: str = "daily", operator_state: str | None = None) -> dict:
         now = self._utc_now()
@@ -1328,6 +1472,41 @@ class OperatorInterfaceSkill:
             "timestamp": now,
         }
 
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+        training_eligible: bool | None = None,
+        retention_class: str | None = None,
+        outcome_score: float | None = None,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        verdict = judge_verdict.upper()
+        eligible = training_eligible if training_eligible is not None else verdict == "PASS"
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="operator_interface",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=None,
+            judge_verdict=verdict,
+            judge_reasoning=judge_reasoning,
+            training_eligible=eligible,
+            retention_class=retention_class or ("STANDARD" if verdict == "PASS" else "FAILURE_AUDIT"),
+            outcome_score=outcome_score if outcome_score is not None else (1.0 if verdict == "PASS" else 0.0),
+        )
+
     def _record_operator_load_snapshot(self, now: str) -> dict[str, Any]:
         conn = self._db.get_connection("operator_digest")
         now_dt = self._parse_ts(now)
@@ -1769,6 +1948,7 @@ def operator_interface_entry(action: str, **kwargs):
             minimum_known_bad_traces=kwargs.get("minimum_known_bad_traces", 1),
             known_bad_score_threshold=kwargs.get("known_bad_score_threshold", 0.35),
             per_trace_cost_cu=kwargs.get("per_trace_cost_cu", 0.05),
+            operator_acknowledged_below_threshold=kwargs.get("operator_acknowledged_below_threshold", False),
             reference_time=kwargs.get("reference_time"),
         )
     if action == "generate_digest":

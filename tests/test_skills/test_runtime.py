@@ -126,9 +126,25 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["workspace_manifest_path"]).is_file()
     assert Path(manifest["operator_validation_checklist_path"]).is_file()
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["network_controls"]["proxy_bind_url"] == "http://127.0.0.1:8877"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["workspace"]["enabled"] is True
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["gateway"]["expected_tools"] == [
+        "web_search",
+        "web_fetch",
+        "image_generation",
+        "browser_automation",
+        "tts",
+    ]
+    assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["workspace"]["preferred_surfaces"] == [
+        "gates",
+        "execution_traces",
+        "quarantines",
+        "replay_readiness",
+        "runtime_halt_state",
+        "milestone_health",
+    ]
     assert profile_config["approvals"]["mode"] == "manual"
     assert spec_profile["profile"] == "hybrid-test"
     assert spec_profile["limits"]["max_api_spend_usd"] == 0.0
@@ -424,6 +440,9 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
     assert result.contract_harness.ok is True
     assert result.config_status["approvals_manual"] is False
     assert result.config_status["dangerous_commands"] is False
+    assert result.config_status["repo_contract_version"] is False
+    assert result.config_status["gateway_expected_tools"] is False
+    assert result.config_status["workspace_preferred_surfaces"] is False
     assert any("profile/config contract assertions failed" in item for item in result.blocking_items)
 
 

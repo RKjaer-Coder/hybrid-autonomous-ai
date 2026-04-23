@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import datetime
 import json
+from pathlib import Path
 import sqlite3
 import uuid
 from typing import Any
+
+from harness_variants import HarnessVariantManager
 
 
 _REQUIRED_TABLES = {
@@ -34,6 +37,7 @@ class RuntimeControlManager:
 
     def __init__(self, operator_db_path: str):
         self._operator_db_path = operator_db_path
+        self._harness_variants = HarnessVariantManager(str(Path(operator_db_path).with_name("telemetry.db")))
         self._available = self._verify_tables()
         if self._available:
             with self._connect() as conn:
@@ -91,7 +95,25 @@ class RuntimeControlManager:
             self._ensure_state_row_locked(conn, now)
             existing = self._active_halt_locked(conn)
             if existing is not None:
-                return self._row_to_halt(existing)
+                result = self._row_to_halt(existing)
+                self._log_trace(
+                    task_id=result["halt_id"],
+                    role="runtime_halt_reused",
+                    action_name="activate_halt",
+                    intent_goal=f"Re-surface existing runtime halt {result['halt_id']}.",
+                    payload={**result, "requested_source": source, "requested_halt_reason": halt_reason},
+                    context_assembled=(
+                        f"existing_halt_id={result['halt_id']}; source={source}; "
+                        f"requested_halt_reason={halt_reason}"
+                    ),
+                    judge_verdict="FAIL",
+                    judge_reasoning="Runtime halt was already active and remained fail-closed.",
+                    training_eligible=False,
+                    retention_class="FAILURE_AUDIT",
+                    outcome_score=0.0,
+                    created_at=now,
+                )
+                return result
             halt_id = str(uuid.uuid4())
             conn.execute(
                 """
@@ -133,7 +155,25 @@ class RuntimeControlManager:
                 (halt_id,),
             ).fetchone()
         assert halt_row is not None
-        return self._row_to_halt(halt_row)
+        result = self._row_to_halt(halt_row)
+        self._log_trace(
+            task_id=halt_id,
+            role="runtime_halt_activation",
+            action_name="activate_halt",
+            intent_goal=f"Activate runtime halt {halt_id}.",
+            payload=result,
+            context_assembled=(
+                f"source={source}; halt_reason={halt_reason}; halt_scope={halt_scope}; "
+                f"requires_human={requires_human}"
+            ),
+            judge_verdict="FAIL",
+            judge_reasoning="Runtime halt activated to preserve fail-closed recovery posture.",
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=0.0,
+            created_at=now,
+        )
+        return result
 
     def record_blocked_restart(
         self,
@@ -283,7 +323,33 @@ class RuntimeControlManager:
                 (restart_id,),
             ).fetchone()
         assert restart_row is not None
-        return self._row_to_restart(restart_row)
+        result = self._row_to_restart(restart_row)
+        self._log_trace(
+            task_id=restart_id,
+            role="runtime_restart_completed" if clear_halt else "runtime_restart_blocked",
+            action_name="complete_restart" if clear_halt else "record_blocked_restart",
+            intent_goal=(
+                f"Clear runtime halt {halt_row['halt_id']} via restart {restart_id}."
+                if clear_halt
+                else f"Record blocked runtime restart {restart_id} for halt {halt_row['halt_id']}."
+            ),
+            payload=result,
+            context_assembled=(
+                f"halt_id={halt_row['halt_id']}; restart_reason={restart_reason}; "
+                f"status={status}; clear_halt={clear_halt}"
+            ),
+            judge_verdict="PASS" if clear_halt else "FAIL",
+            judge_reasoning=(
+                "Runtime restart completed and the active halt was cleared."
+                if clear_halt
+                else "Runtime restart remained blocked and the halt stayed active."
+            ),
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=1.0 if clear_halt else 0.0,
+            created_at=now,
+        )
+        return result
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._operator_db_path, timeout=5.0)
@@ -390,3 +456,38 @@ class RuntimeControlManager:
             "preflight": json.loads(row["preflight_json"]),
             "notes": row["notes"],
         }
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        judge_verdict: str,
+        judge_reasoning: str,
+        training_eligible: bool,
+        retention_class: str,
+        outcome_score: float,
+        created_at: str,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="runtime",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=None,
+            judge_verdict=judge_verdict,
+            judge_reasoning=judge_reasoning,
+            training_eligible=training_eligible,
+            retention_class=retention_class,
+            outcome_score=outcome_score,
+            created_at=created_at,
+        )

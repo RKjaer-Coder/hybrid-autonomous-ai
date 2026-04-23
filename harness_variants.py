@@ -65,6 +65,7 @@ REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES = 500
 REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES = 25
 REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS = 3
 DEFAULT_REPLAY_SAMPLE_TARGET = 50
+REPLAY_ENFORCEMENT_MODE = "FAIL_CLOSED_UNLESS_OPERATOR_ACKNOWLEDGED"
 
 
 def _parse_ts(value: str) -> datetime.datetime:
@@ -182,6 +183,9 @@ class VariantEvalResult:
     traces_evaluated: int
     compute_cost_cu: float
     eval_duration_ms: int
+    replay_readiness_status: str
+    replay_readiness_blockers: list[str]
+    operator_acknowledged_below_threshold: bool
     created_at: str
 
     @property
@@ -407,6 +411,8 @@ class HarnessVariantManager:
             return {
                 "available": False,
                 "status": "UNAVAILABLE",
+                "enforcement_mode": REPLAY_ENFORCEMENT_MODE,
+                "operator_ack_required_below_threshold": True,
                 "minimum_eligible_traces": REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES,
                 "minimum_known_bad_traces": REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES,
                 "minimum_distinct_skills": REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS,
@@ -479,6 +485,8 @@ class HarnessVariantManager:
         return {
             "available": True,
             "status": "READY_FOR_BROADER_REPLAY" if not blockers else "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD",
+            "enforcement_mode": REPLAY_ENFORCEMENT_MODE,
+            "operator_ack_required_below_threshold": True,
             "minimum_eligible_traces": REPLAY_ACTIVATION_MIN_ELIGIBLE_TRACES,
             "minimum_known_bad_traces": REPLAY_ACTIVATION_MIN_KNOWN_BAD_TRACES,
             "minimum_distinct_skills": REPLAY_ACTIVATION_MIN_DISTINCT_SKILLS,
@@ -651,6 +659,7 @@ class HarnessVariantManager:
         minimum_known_bad_traces: int = 1,
         known_bad_score_threshold: float = 0.35,
         per_trace_cost_cu: float = 0.05,
+        allow_below_activation_threshold: bool = False,
         reference_time: str | None = None,
     ) -> dict[str, Any]:
         if not self._available:
@@ -668,6 +677,13 @@ class HarnessVariantManager:
             variant = self.start_shadow_eval(variant_id, reference_time=now)
         elif variant["status"] != "SHADOW_EVAL":
             raise ValueError(f"Variant {variant_id} is not eligible for shadow replay: {variant['status']}")
+        replay_readiness = self.replay_readiness_summary()
+        replay_blockers = list(replay_readiness["blockers"])
+        if replay_readiness["status"] != "READY_FOR_BROADER_REPLAY" and not allow_below_activation_threshold:
+            raise ValueError(
+                "Replay readiness below activation threshold; explicit operator acknowledgement is required: "
+                + ", ".join(replay_blockers)
+            )
 
         start = time.perf_counter()
         baseline_rows = self._select_replay_traces(
@@ -763,6 +779,11 @@ class HarnessVariantManager:
             traces_evaluated=traces_evaluated,
             compute_cost_cu=round((traces_evaluated + known_bad_count) * per_trace_cost_cu, 6),
             eval_duration_ms=eval_duration_ms,
+            replay_readiness_status=replay_readiness["status"],
+            replay_readiness_blockers=replay_blockers,
+            operator_acknowledged_below_threshold=bool(
+                replay_readiness["status"] != "READY_FOR_BROADER_REPLAY" and allow_below_activation_threshold
+            ),
             created_at=now,
         )
         return self.record_eval_result(variant_id, result, reference_time=now)

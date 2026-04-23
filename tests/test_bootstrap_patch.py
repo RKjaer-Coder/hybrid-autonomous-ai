@@ -6,6 +6,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 from immune import judge
 from immune.bootstrap_patch import _stack_has_immune_wrapper, apply_immune_patch
 from immune.types import BlockReason, ImmuneBlockError, Outcome
@@ -97,12 +99,8 @@ def test_sheriff_block_raises(clean_sheriff_payload, default_config, test_db):
         default_config,
         logger,
     )
-    try:
+    with pytest.raises(ImmuneBlockError):
         sys.modules["hermes.tools.base"].execute_tool(tool_name="safe_tool", arguments={}, skill_name="immune_system", session_id=clean_sheriff_payload.session_id)
-    except ImmuneBlockError:
-        assert True
-    else:
-        assert False
 
 
 def test_judge_block_raises(clean_sheriff_payload, default_config, test_db):
@@ -114,12 +112,8 @@ def test_judge_block_raises(clean_sheriff_payload, default_config, test_db):
         default_config,
         logger,
     )
-    try:
+    with pytest.raises(ImmuneBlockError):
         sys.modules["hermes.tools.base"].execute_tool(tool_name="safe_tool", arguments={}, skill_name="immune_system", session_id=clean_sheriff_payload.session_id)
-    except ImmuneBlockError:
-        assert True
-    else:
-        assert False
 
 
 def test_patch_overhead(clean_sheriff_payload, default_config, test_db):
@@ -183,7 +177,7 @@ def test_patch_blocks_execution_before_dispatch_when_runtime_halted(clean_sherif
         halt_reason="runtime_halt_contract_test",
     )
     assert apply_immune_patch(lambda *_: _pass_verdict(), lambda *_: _pass_verdict(), default_config, logger)
-    try:
+    with pytest.raises(ImmuneBlockError, match="Runtime halt active"):
         sys.modules["hermes.tools.base"].execute_tool(
             tool_name="safe_tool",
             arguments={},
@@ -191,8 +185,4 @@ def test_patch_blocks_execution_before_dispatch_when_runtime_halted(clean_sherif
             session_id=clean_sheriff_payload.session_id,
             execution_stack="immune_system",
         )
-    except ImmuneBlockError as exc:
-        assert "Runtime halt active" in str(exc)
-    else:
-        assert False
     assert called["dispatch"] == 0

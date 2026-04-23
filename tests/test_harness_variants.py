@@ -139,6 +139,9 @@ def test_harness_variant_lifecycle_and_frontier(tmp_path):
             traces_evaluated=3,
             compute_cost_cu=1.5,
             eval_duration_ms=250,
+            replay_readiness_status="READY_FOR_BROADER_REPLAY",
+            replay_readiness_blockers=[],
+            operator_acknowledged_below_threshold=False,
             created_at="2026-04-21T12:03:00+00:00",
         ),
         reference_time="2026-04-21T12:03:00+00:00",
@@ -261,6 +264,7 @@ def test_harness_variant_replay_eval_uses_execution_traces(tmp_path):
         sample_size=10,
         minimum_trace_count=3,
         minimum_known_bad_traces=1,
+        allow_below_activation_threshold=True,
         reference_time="2026-04-21T12:11:00+00:00",
     )
 
@@ -269,7 +273,60 @@ def test_harness_variant_replay_eval_uses_execution_traces(tmp_path):
     assert replayed["eval_result"]["traces_evaluated"] == 3
     assert replayed["eval_result"]["known_bad_block_rate"] == 1.0
     assert replayed["eval_result"]["quality_delta"] > 0.0
+    assert replayed["eval_result"]["replay_readiness_status"] == "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD"
+    assert replayed["eval_result"]["operator_acknowledged_below_threshold"] is True
     replay_traces = manager.list_execution_traces(limit=20, skill_name="research_domain")
     replay_artifacts = [row for row in replay_traces if row["source_trace_id"] is not None]
     assert len(replay_artifacts) == 4
     assert all(row["harness_version"] == proposed["variant_id"] for row in replay_artifacts)
+
+
+def test_harness_variant_replay_eval_requires_explicit_ack_below_threshold(tmp_path):
+    manager = _telemetry_manager(tmp_path)
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="baseline-1",
+            task_id="task-1",
+            role="runtime",
+            skill_name="research_domain",
+            harness_version="baseline-v1",
+            intent_goal="baseline replay set",
+            steps=[],
+            prompt_template="baseline prompt",
+            context_assembled="context",
+            retrieval_queries=["market signal"],
+            judge_verdict="PASS",
+            judge_reasoning="good",
+            outcome_score=0.72,
+            cost_usd=0.0,
+            duration_ms=25,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-1",
+            source_session_id="session-1",
+            source_trace_id=None,
+            created_at="2026-04-21T12:01:00+00:00",
+        )
+    )
+
+    proposed = manager.propose_variant(
+        skill_name="research_domain",
+        parent_version="baseline-v1",
+        diff="@@ -1 +1 @@\n-old\n+new retrieval calibration\n",
+        source="operator",
+        reference_time="2026-04-21T12:10:00+00:00",
+    )
+
+    try:
+        manager.evaluate_variant_from_traces(
+            proposed["variant_id"],
+            sample_size=10,
+            minimum_trace_count=1,
+            minimum_known_bad_traces=0,
+            reference_time="2026-04-21T12:11:00+00:00",
+        )
+    except ValueError as exc:
+        assert "explicit operator acknowledgement is required" in str(exc)
+    else:
+        raise AssertionError("expected below-threshold replay to require explicit acknowledgement")

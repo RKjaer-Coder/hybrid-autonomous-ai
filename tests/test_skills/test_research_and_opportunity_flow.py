@@ -645,5 +645,7 @@ def test_route_brief_creates_harvest_and_qualified_opportunity_actions(test_data
     assert json.loads(held_task_row["follow_up_tasks"]) == [held_route["actions"][0]["follow_up_task_id"]]
     research_traces = traces.list_execution_traces(limit=10, skill_name="research_domain")
     council_traces = traces.list_execution_traces(limit=10, skill_name="council")
+    strategic_memory_traces = traces.list_execution_traces(limit=10, skill_name="strategic_memory")
     assert any(row["role"] == "research_task_routing" for row in research_traces)
     assert any(row["role"] == "council_deliberation" for row in council_traces)
+    assert any(row["role"] == "strategic_memory_routing" for row in strategic_memory_traces)

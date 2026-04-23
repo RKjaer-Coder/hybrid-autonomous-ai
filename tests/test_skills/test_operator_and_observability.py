@@ -62,6 +62,7 @@ def test_operator_interface_generates_idempotent_digest_with_urgent_pending_firs
     db = DatabaseManager(str(test_data_dir))
     memory = StrategicMemorySkill(db)
     operator = OperatorInterfaceSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     financial = db.get_connection("financial_ledger")
     strategic = db.get_connection("strategic_memory")
     operator_db = db.get_connection("operator_digest")
@@ -205,17 +206,22 @@ def test_operator_interface_generates_idempotent_digest_with_urgent_pending_firs
 
     digest_a = operator.generate_digest()
     digest_b = operator.generate_digest()
+    ack = operator.acknowledge_digest(digest_a["digest_id"], reference_time=_ts(now + datetime.timedelta(minutes=1)))
 
     assert digest_a["digest_id"] == digest_b["digest_id"]
     assert digest_a["digest_type"] == "daily"
     assert digest_a["sections_included"][0] == "PENDING DECISIONS"
     assert "Fresh Brief (ACTION_RECOMMENDED)" in digest_a["content"]
     assert "OLR=" in digest_a["content"]
+    assert ack["digest_id"] == digest_a["digest_id"]
+    operator_traces = traces.list_execution_traces(limit=10, skill_name="operator_interface")
+    assert any(row["role"] == "operator_digest_acknowledgement" for row in operator_traces)
 
 
 def test_operator_interface_enforces_alert_suppression_and_acknowledgement(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     base = _now()
 
     first = operator.alert(
@@ -262,6 +268,8 @@ def test_operator_interface_enforces_alert_suppression_and_acknowledgement(test_
     assert len(delivered_t3) == 2
     assert ack["alert_id"] == t3_a
     assert operator.list_alerts(limit=5, tier="T3", unacknowledged_only=True)[0]["acknowledged"] is False
+    operator_traces = traces.list_execution_traces(limit=10, skill_name="operator_interface")
+    assert any(row["role"] == "operator_alert_acknowledgement" for row in operator_traces)
 
 
 def test_observability_queries_filters_breakers_and_health_modes(test_data_dir):
@@ -446,6 +454,7 @@ def test_quarantined_responses_and_disputed_costs_surface_for_operator_review(te
     operator = OperatorInterfaceSkill(db)
     observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
     router = FinancialRouterSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     financial = db.get_connection("financial_ledger")
     now = _now()
 
@@ -544,6 +553,8 @@ def test_quarantined_responses_and_disputed_costs_surface_for_operator_review(te
     assert reviewed["review_status"] == "DISCARDED"
     assert reviewed["operator_decision"] == "DISCARD"
     assert pending_after == []
+    operator_traces = traces.list_execution_traces(limit=20, skill_name="operator_interface")
+    assert any(row["role"] == "operator_quarantine_review" for row in operator_traces)
 
 
 def test_g3_requests_surface_for_operator_digest_and_observability(test_data_dir):
@@ -551,6 +562,7 @@ def test_g3_requests_surface_for_operator_digest_and_observability(test_data_dir
     operator = OperatorInterfaceSkill(db)
     observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
     router = FinancialRouterSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     financial = db.get_connection("financial_ledger")
     now = _now()
 
@@ -660,6 +672,8 @@ def test_g3_requests_surface_for_operator_digest_and_observability(test_data_dir
     assert health["g3_requests"]["denied_24h"] == 1
     assert health["g3_requests"]["expired_24h"] == 1
     assert "g3=pending:0/approved24h:1/denied24h:1/expired24h:1" in digest["content"]
+    trace_roles = {row["role"] for row in traces.list_execution_traces(limit=20, skill_name="financial_router")}
+    assert {"financial_route_decision", "financial_g3_review"} <= trace_roles
 
 
 def test_judge_fallback_incidents_surface_in_observability_and_digest(test_data_dir):
@@ -731,6 +745,7 @@ def test_judge_deadlock_restart_is_explicit_and_retro_reviews_fallback_passes(te
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
     observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     immune = db.get_connection("immune")
     manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
     now = _now()
@@ -816,11 +831,20 @@ def test_judge_deadlock_restart_is_explicit_and_retro_reviews_fallback_passes(te
     assert status_after["mode"] == "NORMAL"
     assert blocked_reviews[0]["review_status"] == "BLOCK"
     assert "judge_review blocked=1" in blocked_digest["content"]
+    operator_traces = traces.list_execution_traces(limit=20, skill_name="operator_interface")
+    immune_traces = traces.list_execution_traces(limit=20, skill_name="immune_system")
+    assert any(row["role"] == "operator_judge_deadlock_restart" for row in operator_traces)
+    immune_roles = {row["role"] for row in immune_traces}
+    assert "judge_deadlock_fallback_activation" in immune_roles
+    assert "judge_deadlock_review_enqueue" in immune_roles
+    assert "judge_deadlock_retro_review" in immune_roles
+    assert "judge_deadlock_clear" in immune_roles
 
 
 def test_judge_deadlock_fallback_auto_expiry_halts_when_blocks_persist(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     immune = db.get_connection("immune")
     manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
     now = _now()
@@ -874,12 +898,18 @@ def test_judge_deadlock_fallback_auto_expiry_halts_when_blocks_persist(test_data
     assert status["mode"] == "HALTED"
     assert events[0]["status"] == "HALTED"
     assert events[0]["end_reason"] == "judge_deadlock_fallback_expired_with_persistent_blocks"
+    immune_traces = traces.list_execution_traces(limit=20, skill_name="immune_system")
+    assert any(
+        row["role"] == "judge_deadlock_halt" and row["judge_verdict"] == "FAIL"
+        for row in immune_traces
+    )
 
 
 def test_runtime_halt_contract_surfaces_and_allows_audited_restart_after_deadlock_clears(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
     observability = ObservabilitySkill(db, telemetry_buffer=None, immune_buffer=None)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     immune = db.get_connection("immune")
     manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
     now = _now()
@@ -951,11 +981,21 @@ def test_runtime_halt_contract_surfaces_and_allows_audited_restart_after_deadloc
     assert restarted["runtime_restart"]["status"] == "COMPLETED"
     assert final_runtime_status["lifecycle_state"] == "ACTIVE"
     assert restart_history[0]["status"] == "COMPLETED"
+    operator_traces = traces.list_execution_traces(limit=20, skill_name="operator_interface")
+    runtime_traces = traces.list_execution_traces(limit=20, skill_name="runtime")
+    assert any(
+        row["role"] == "operator_runtime_restart" and row["judge_verdict"] == "PASS"
+        for row in operator_traces
+    )
+    runtime_roles = {row["role"] for row in runtime_traces}
+    assert "runtime_halt_activation" in runtime_roles
+    assert "runtime_restart_completed" in runtime_roles
 
 
 def test_runtime_restart_attempt_is_blocked_while_deadlock_persists(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     operator = OperatorInterfaceSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     immune = db.get_connection("immune")
     manager = JudgeLifecycleManager(str(test_data_dir / "immune_system.db"), load_config())
     now = _now()
@@ -1016,6 +1056,16 @@ def test_runtime_restart_attempt_is_blocked_while_deadlock_persists(test_data_di
     assert blocked["runtime_restart"]["status"] == "BLOCKED"
     assert runtime_status["lifecycle_state"] == "HALTED"
     assert restart_history[0]["status"] == "BLOCKED"
+    operator_traces = traces.list_execution_traces(limit=20, skill_name="operator_interface")
+    runtime_traces = traces.list_execution_traces(limit=20, skill_name="runtime")
+    assert any(
+        row["role"] == "operator_runtime_restart" and row["judge_verdict"] == "FAIL"
+        for row in operator_traces
+    )
+    assert any(
+        row["role"] == "runtime_restart_blocked" and row["judge_verdict"] == "FAIL"
+        for row in runtime_traces
+    )
 
 
 def test_second_judge_deadlock_trigger_inside_guard_halts_and_keeps_fail_closed_posture(test_data_dir):
@@ -1341,6 +1391,7 @@ def test_operator_can_run_replay_eval_from_execution_traces(test_data_dir):
         sample_size=10,
         minimum_trace_count=3,
         minimum_known_bad_traces=1,
+        operator_acknowledged_below_threshold=True,
         reference_time="2026-04-21T13:11:00+00:00",
     )
 
@@ -1348,6 +1399,8 @@ def test_operator_can_run_replay_eval_from_execution_traces(test_data_dir):
     assert evaluated["eval_result"]["traces_evaluated"] == 3
     assert evaluated["eval_result"]["known_bad_block_rate"] == 1.0
     assert evaluated["eval_result"]["gate_1_pass"] is True
+    assert evaluated["replay_readiness"]["status"] == "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD"
+    assert evaluated["operator_alert_id"]
 
 
 def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
@@ -1385,6 +1438,7 @@ def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
     replay = health["harness_variants"]["execution_traces"]["replay_readiness"]
 
     assert replay["status"] == "IMPLEMENTED_BELOW_ACTIVATION_THRESHOLD"
+    assert replay["operator_ack_required_below_threshold"] is True
     assert replay["eligible_source_traces"] == 1
     assert replay["known_bad_source_traces"] == 0
     assert replay["distinct_skill_count"] == 1
@@ -1392,6 +1446,64 @@ def test_replay_readiness_summary_surfaces_threshold_gap(test_data_dir):
     assert replay["minimum_known_bad_traces"] == 25
     assert replay["minimum_distinct_skills"] == 3
     assert replay["blockers"]
+
+
+def test_operator_replay_eval_requires_ack_and_emits_alert(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    operator = OperatorInterfaceSkill(db)
+    manager = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+    operator_db = db.get_connection("operator_digest")
+
+    manager.log_execution_trace(
+        ExecutionTrace(
+            trace_id="research-small-1",
+            task_id="task-small-1",
+            role="runtime",
+            skill_name="research_domain",
+            harness_version="baseline-v1",
+            intent_goal="baseline replay set",
+            steps=[],
+            prompt_template="baseline prompt",
+            context_assembled="context",
+            retrieval_queries=["signal"],
+            judge_verdict="PASS",
+            judge_reasoning="good",
+            outcome_score=0.75,
+            cost_usd=0.0,
+            duration_ms=10,
+            training_eligible=True,
+            retention_class="STANDARD",
+            source_chain_id="chain-small-1",
+            source_session_id="session-small-1",
+            source_trace_id=None,
+            created_at="2026-04-21T14:00:00+00:00",
+        )
+    )
+
+    proposed = operator.propose_harness_variant(
+        skill_name="research_domain",
+        parent_version="baseline-v1",
+        diff="@@ -1 +1 @@\n-old\n+new\n",
+        reference_time="2026-04-21T14:10:00+00:00",
+    )
+
+    try:
+        operator.evaluate_harness_variant_from_traces(
+            variant_id=proposed["variant_id"],
+            minimum_trace_count=1,
+            minimum_known_bad_traces=0,
+            reference_time="2026-04-21T14:11:00+00:00",
+        )
+    except ValueError as exc:
+        assert "operator_acknowledged_below_threshold=True" in str(exc)
+    else:
+        raise AssertionError("expected replay eval to require explicit operator acknowledgement")
+
+    alert = operator_db.execute(
+        "SELECT alert_type, content FROM alert_log ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert alert["alert_type"] == "REPLAY_READINESS_ACK_REQUIRED"
+    assert "blocked below activation threshold" in alert["content"]
 
 
 def test_operator_and_observability_surface_workspace_overview_and_milestone_health(test_data_dir):

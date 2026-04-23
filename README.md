@@ -20,7 +20,10 @@ substrates, but live Hermes attachment on the target machine is still pending.
 - Research, strategic-memory, opportunity, operator, and observability skills
 - Repo-local Hermes contract harness, deterministic operator workflow proof,
   and readiness/doctor flows
-- Replayable `execution_traces` and §8.3b harness-variant substrate
+- Replayable `execution_traces` across runtime, council, research,
+  opportunity, and strategic-memory routing/writeback paths
+- §8.3b harness-variant substrate with replay-readiness guardrails and
+  explicit operator acknowledgement for below-threshold shadow replay
 - CI on `main`, `codex/**`, and PRs to `main`
 
 ## What This Repo Is Not Yet

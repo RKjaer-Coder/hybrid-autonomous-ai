@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from harness_variants import HarnessVariantManager
 from skills.db_manager import DatabaseManager
 from skills.strategic_memory.skill import StrategicMemorySkill
 
@@ -79,3 +80,26 @@ def test_full_brief_quality_rules_and_source_diversity_gate(test_data_dir):
     assert passed["source_diversity_hold"] is False
     assert passed["quality_warning"] is False
     assert held_rows[0]["brief_id"] == held_id
+
+
+def test_strategic_memory_emits_execution_traces_for_write_and_quality_signal(test_data_dir):
+    db = DatabaseManager(str(test_data_dir))
+    skill = StrategicMemorySkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
+
+    brief_id = skill.write_brief(
+        "task-trace",
+        "Traceable Brief",
+        "Summary",
+        source_urls=["https://example.com/a"],
+        provenance_links=["signal-1"],
+    )
+    signal = skill.record_quality_signal(brief_id, "incomplete", missing_dimension="source_diversity")
+
+    strategic_traces = traces.list_execution_traces(limit=10, skill_name="strategic_memory")
+
+    assert signal["brief_id"] == brief_id
+    assert {row["role"] for row in strategic_traces} >= {
+        "strategic_memory_brief_write",
+        "brief_quality_signal",
+    }

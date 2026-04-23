@@ -195,6 +195,14 @@ class HermesProfileContract:
             and contains_subset(actual_spec_profile_doc, expected_spec_profile_doc),
             "profile_name": nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name")
             == self.config.profile_name,
+            "repo_contract_version": nested_get(
+                actual_config_doc or {},
+                "skills",
+                "config",
+                PROFILE_CONFIG_SKILL_KEY,
+                "repo_contract_version",
+            )
+            == self.skill_config()["repo_contract_version"],
             "local_model": nested_get(actual_config_doc or {}, "model", "provider") == "custom"
             and nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
             and nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
@@ -226,9 +234,25 @@ class HermesProfileContract:
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway") or {},
                 self.gateway_mapping(),
             ),
+            "gateway_expected_tools": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway", "expected_tools") or [],
+                self.gateway_mapping()["expected_tools"],
+            ),
             "workspace_mapping": contains_subset(
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "workspace") or {},
                 self.workspace_mapping(),
+            ),
+            "workspace_preferred_surfaces": contains_subset(
+                nested_get(
+                    actual_config_doc or {},
+                    "skills",
+                    "config",
+                    PROFILE_CONFIG_SKILL_KEY,
+                    "workspace",
+                    "preferred_surfaces",
+                )
+                or [],
+                self.workspace_mapping()["preferred_surfaces"],
             ),
         }
 
@@ -238,6 +262,14 @@ class HermesProfileContract:
             "config_probe_shape": actual_config_doc is not None and contains_subset(actual_config_doc, expected_config_doc),
             "profile_name": nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "profile_name")
             == self.config.profile_name,
+            "repo_contract_version": nested_get(
+                actual_config_doc or {},
+                "skills",
+                "config",
+                PROFILE_CONFIG_SKILL_KEY,
+                "repo_contract_version",
+            )
+            == self.skill_config()["repo_contract_version"],
             "local_model": nested_get(actual_config_doc or {}, "model", "provider") == "custom"
             and nested_get(actual_config_doc or {}, "model", "default") == DEFAULT_LOCAL_MODEL
             and nested_get(actual_config_doc or {}, "model", "base_url") == DEFAULT_LOCAL_BASE_URL,
@@ -269,8 +301,24 @@ class HermesProfileContract:
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway") or {},
                 self.gateway_mapping(),
             ),
+            "gateway_expected_tools": contains_subset(
+                nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "gateway", "expected_tools") or [],
+                self.gateway_mapping()["expected_tools"],
+            ),
             "workspace_mapping": contains_subset(
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "workspace") or {},
                 self.workspace_mapping(),
+            ),
+            "workspace_preferred_surfaces": contains_subset(
+                nested_get(
+                    actual_config_doc or {},
+                    "skills",
+                    "config",
+                    PROFILE_CONFIG_SKILL_KEY,
+                    "workspace",
+                    "preferred_surfaces",
+                )
+                or [],
+                self.workspace_mapping()["preferred_surfaces"],
             ),
         }

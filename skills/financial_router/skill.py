@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from typing import Any, Optional
 
+from harness_variants import HarnessVariantManager
 from financial_router.router import (
     _DEFAULT_RESERVATIONS,
     commit_paid_reservation,
@@ -32,6 +33,7 @@ LOGGER = logging.getLogger(__name__)
 class FinancialRouterSkill:
     def __init__(self, db_manager: DatabaseManager):
         self._db = db_manager
+        self._harness_variants = HarnessVariantManager(str(db_manager.data_dir / "telemetry.db"))
 
     def route(self, task: TaskMetadata, models: list[ModelInfo], budget: BudgetState, jwt: JWTClaims) -> RoutingDecision:
         now = self._utc_now()
@@ -40,6 +42,23 @@ class FinancialRouterSkill:
         financial = self._db.get_connection("financial_ledger")
         existing = self._latest_routing_row(financial, correlation_id)
         if existing is not None:
+            self._log_trace(
+                task_id=task.task_id,
+                role="financial_route_reused",
+                action_name="route",
+                intent_goal=f"Reuse existing routing decision for correlation {correlation_id}.",
+                payload={
+                    "correlation_id": correlation_id,
+                    "decision_id": existing["decision_id"],
+                    "route_selected": existing["route_selected"],
+                    "g3_status": existing["g3_status"],
+                    "dispatch_status": existing["dispatch_status"],
+                },
+                context_assembled=(
+                    f"task_type={task.task_type}; capability={task.required_capability}; "
+                    f"project_id={task.project_id}; session_id={jwt.session_id}"
+                ),
+            )
             return self._decision_from_row(existing)
 
         decision = route_task(task, models, budget, jwt)
@@ -109,6 +128,26 @@ class FinancialRouterSkill:
             )
 
         financial.commit()
+        self._log_trace(
+            task_id=task.task_id,
+            role="financial_route_decision",
+            action_name="route",
+            intent_goal=f"Persist routing decision for correlation {correlation_id}.",
+            payload={
+                "correlation_id": correlation_id,
+                "tier": decision.tier.value,
+                "model_id": decision.model_id,
+                "requires_operator_approval": decision.requires_operator_approval,
+                "g3_status": g3_status,
+                "dispatch_status": dispatch_status,
+                "estimated_cost_usd": decision.estimated_cost_usd,
+            },
+            context_assembled=(
+                f"task_type={task.task_type}; capability={task.required_capability}; "
+                f"project_id={task.project_id}; session_id={jwt.session_id}; "
+                f"operating_phase={task.is_operating_phase}"
+            ),
+        )
         return decision
 
     def list_g3_approval_requests(
@@ -212,7 +251,29 @@ class FinancialRouterSkill:
             (request_id,),
         ).fetchone()
         assert updated is not None
-        return self._g3_request_row_to_dict(updated)
+        reviewed = self._g3_request_row_to_dict(updated)
+        approved = reviewed["status"] == G3RequestStatus.APPROVED.value
+        self._log_trace(
+            task_id=reviewed["task_id"],
+            role="financial_g3_review",
+            action_name="review_g3_approval_request",
+            intent_goal=f"Apply operator G3 decision {reviewed['status']} for request {request_id}.",
+            payload=reviewed,
+            context_assembled=(
+                f"correlation_id={reviewed['correlation_id']}; session_id={reviewed['session_id']}; "
+                f"project_id={reviewed['project_id']}; requested_model={reviewed['requested_model']}"
+            ),
+            judge_verdict="PASS" if approved else "FAIL",
+            judge_reasoning=(
+                "Operator approved paid route."
+                if approved
+                else f"G3 request {reviewed['status'].lower()} by operator or timeout."
+            ),
+            training_eligible=approved,
+            retention_class="STANDARD" if approved else "FAILURE_AUDIT",
+            outcome_score=1.0 if approved else 0.0,
+        )
+        return reviewed
 
     def expire_stale_g3_requests(self, *, reference_time: str | None = None) -> list[dict[str, Any]]:
         now = self._resolve_now(reference_time)
@@ -239,6 +300,23 @@ class FinancialRouterSkill:
             )
             updated.append({**self._g3_request_row_to_dict(row), "status": G3RequestStatus.EXPIRED.value, "responded_at": now})
         financial.commit()
+        for row in updated:
+            self._log_trace(
+                task_id=row["task_id"],
+                role="financial_g3_expiry",
+                action_name="expire_stale_g3_requests",
+                intent_goal=f"Expire stale G3 request {row['request_id']} after timeout.",
+                payload=row,
+                context_assembled=(
+                    f"correlation_id={row['correlation_id']}; session_id={row['session_id']}; "
+                    f"project_id={row['project_id']}; expires_at={row['expires_at']}"
+                ),
+                judge_verdict="FAIL",
+                judge_reasoning="G3 request expired before operator response.",
+                training_eligible=False,
+                retention_class="FAILURE_AUDIT",
+                outcome_score=0.0,
+            )
         return updated
 
     def dispatch_approved_paid_route(
@@ -333,7 +411,7 @@ class FinancialRouterSkill:
             ),
         )
         financial.commit()
-        return {
+        result = {
             "correlation_id": correlation_id,
             "route_decision_id": route_row["decision_id"],
             "cost_record_id": cost_record_id,
@@ -343,6 +421,18 @@ class FinancialRouterSkill:
             "estimated_cost_usd": estimated_cost,
             "dispatched_at": now,
         }
+        self._log_trace(
+            task_id=route_row["task_id"],
+            role="financial_paid_dispatch",
+            action_name="dispatch_approved_paid_route",
+            intent_goal=f"Dispatch approved paid route for correlation {correlation_id}.",
+            payload=result,
+            context_assembled=(
+                f"session_id={jwt.session_id}; model_used={route_row['model_used']}; "
+                f"project_id={route_row['project_id']}; reservation_id={reservation_id}"
+            ),
+        )
+        return result
 
     def finalize_paid_dispatch(
         self,
@@ -372,7 +462,7 @@ class FinancialRouterSkill:
         if route_row["dispatch_status"] == DispatchStatus.FINALIZED.value and cost_row["cost_status"] == CostStatus.FINAL.value:
             if abs(existing_amount - final_cost_usd) > 1e-9:
                 raise ValueError("Paid route already finalized with a different final cost.")
-            return {
+            result = {
                 "correlation_id": correlation_id,
                 "route_decision_id": route_row["decision_id"],
                 "cost_record_id": cost_row["record_id"],
@@ -381,6 +471,18 @@ class FinancialRouterSkill:
                 "final_cost_usd": existing_amount,
                 "finalized_at": route_row["finalized_at"],
             }
+            self._log_trace(
+                task_id=route_row["task_id"],
+                role="financial_paid_finalization_reused",
+                action_name="finalize_paid_dispatch",
+                intent_goal=f"Reuse finalized paid route state for correlation {correlation_id}.",
+                payload=result,
+                context_assembled=(
+                    f"session_id={route_row['session_id']}; provider={cost_row['provider']}; "
+                    f"project_id={route_row['project_id']}"
+                ),
+            )
+            return result
 
         financial.execute(
             """
@@ -417,7 +519,7 @@ class FinancialRouterSkill:
                 "paid_reservation_commit_failed_after_finalization",
                 extra={"correlation_id": correlation_id, "reservation_id": reservation_id},
             )
-        return {
+        result = {
             "correlation_id": correlation_id,
             "route_decision_id": route_row["decision_id"],
             "cost_record_id": cost_row["record_id"],
@@ -426,6 +528,18 @@ class FinancialRouterSkill:
             "final_cost_usd": final_cost_usd,
             "finalized_at": now,
         }
+        self._log_trace(
+            task_id=route_row["task_id"],
+            role="financial_paid_finalization",
+            action_name="finalize_paid_dispatch",
+            intent_goal=f"Finalize paid dispatch for correlation {correlation_id}.",
+            payload=result,
+            context_assembled=(
+                f"session_id={route_row['session_id']}; provider={provider or cost_row['provider']}; "
+                f"project_id={route_row['project_id']}; reservation_id={reservation_id}"
+            ),
+        )
+        return result
 
     def quarantine_inflight_paid_response(
         self,
@@ -543,7 +657,7 @@ class FinancialRouterSkill:
                 exc_info=True,
             )
 
-        return {
+        result = {
             "correlation_id": correlation_id,
             "route_decision_id": route_row["decision_id"],
             "cost_record_id": cost_record_id,
@@ -554,6 +668,23 @@ class FinancialRouterSkill:
             "received_at": received_ts,
             "quarantined_at": now if quarantine_persisted else None,
         }
+        self._log_trace(
+            task_id=route_row["task_id"],
+            role="financial_paid_quarantine",
+            action_name="quarantine_inflight_paid_response",
+            intent_goal=f"Quarantine disputed in-flight paid response for correlation {correlation_id}.",
+            payload=result,
+            context_assembled=(
+                f"session_id={route_row['session_id']}; project_id={route_row['project_id']}; "
+                f"model_used={route_row['model_used']}; quarantine_persisted={quarantine_persisted}"
+            ),
+            judge_verdict="FAIL",
+            judge_reasoning="Paid response quarantined during security cascade.",
+            training_eligible=False,
+            retention_class="FAILURE_AUDIT",
+            outcome_score=0.0,
+        )
+        return result
 
     def _create_g3_request(
         self,
@@ -790,6 +921,41 @@ class FinancialRouterSkill:
 
     def _resolve_now(self, reference_time: str | None) -> str:
         return self._utc_now() if reference_time is None else self._to_iso(self._parse_ts(reference_time))
+
+    def _log_trace(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        action_name: str,
+        intent_goal: str,
+        payload: Any,
+        context_assembled: str,
+        judge_verdict: str = "PASS",
+        judge_reasoning: str | None = None,
+        training_eligible: bool | None = None,
+        retention_class: str | None = None,
+        outcome_score: float | None = None,
+    ) -> None:
+        if not self._harness_variants.available:
+            return
+        verdict = judge_verdict.upper()
+        eligible = training_eligible if training_eligible is not None else verdict == "PASS"
+        self._harness_variants.log_skill_action_trace(
+            task_id=task_id,
+            role=role,
+            skill_name="financial_router",
+            action_name=action_name,
+            intent_goal=intent_goal,
+            action_payload=payload,
+            context_assembled=context_assembled,
+            retrieval_queries=None,
+            judge_verdict=verdict,
+            judge_reasoning=judge_reasoning,
+            training_eligible=eligible,
+            retention_class=retention_class or ("STANDARD" if verdict == "PASS" else "FAILURE_AUDIT"),
+            outcome_score=outcome_score if outcome_score is not None else (1.0 if verdict == "PASS" else 0.0),
+        )
 
     @staticmethod
     def _utc_now() -> str:

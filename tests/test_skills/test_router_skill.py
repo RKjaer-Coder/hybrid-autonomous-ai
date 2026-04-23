@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from harness_variants import HarnessVariantManager
 from financial_router.types import BudgetState, JWTClaims, ModelInfo, SystemPhase, TaskMetadata
 from skills.db_manager import DatabaseManager
 from skills.financial_router.skill import FinancialRouterSkill
@@ -10,6 +11,7 @@ from skills.financial_router.skill import FinancialRouterSkill
 def test_router_wraps_and_logs(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     skill = FinancialRouterSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     decision = skill.route(
         TaskMetadata(task_id="t1", task_type="x", required_capability="y", quality_threshold=0.1),
         [ModelInfo("m-local", "local", True, 0.9, 0.0)],
@@ -20,6 +22,8 @@ def test_router_wraps_and_logs(test_data_dir):
     conn = db.get_connection("financial_ledger")
     n = conn.execute("SELECT COUNT(*) FROM routing_decisions").fetchone()[0]
     assert n == 1
+    financial_traces = traces.list_execution_traces(limit=5, skill_name="financial_router")
+    assert financial_traces[0]["role"] == "financial_route_decision"
 
 
 def test_router_persists_default_fallback_route(test_data_dir):
@@ -44,6 +48,7 @@ def test_router_persists_default_fallback_route(test_data_dir):
 def test_router_quarantines_interrupted_paid_call_as_disputed(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     skill = FinancialRouterSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     ledger = db.get_connection("financial_ledger")
     ledger.execute(
         """
@@ -161,11 +166,14 @@ def test_router_quarantines_interrupted_paid_call_as_disputed(test_data_dir):
     assert quarantine_row["source_breaker"] == "SECURITY_CASCADE"
     assert quarantine_row["session_id"] == "session-paid"
     assert quarantine_row["task_id"] == "t-paid"
+    trace_roles = {row["role"] for row in traces.list_execution_traces(limit=10, skill_name="financial_router")}
+    assert {"financial_route_decision", "financial_paid_dispatch", "financial_paid_quarantine"} <= trace_roles
 
 
 def test_path_b_g3_request_dispatch_and_final_reconciliation(test_data_dir):
     db = DatabaseManager(str(test_data_dir))
     skill = FinancialRouterSkill(db)
+    traces = HarnessVariantManager(str(test_data_dir / "telemetry.db"))
     ledger = db.get_connection("financial_ledger")
 
     decision = skill.route(
@@ -254,3 +262,10 @@ def test_path_b_g3_request_dispatch_and_final_reconciliation(test_data_dir):
     assert route_row["final_cost_usd"] == 0.013
     assert cost_row["amount_usd"] == 0.013
     assert cost_row["cost_status"] == "FINAL"
+    trace_roles = {row["role"] for row in traces.list_execution_traces(limit=10, skill_name="financial_router")}
+    assert {
+        "financial_route_decision",
+        "financial_g3_review",
+        "financial_paid_dispatch",
+        "financial_paid_finalization",
+    } <= trace_roles
