@@ -37,7 +37,10 @@ class RuntimeControlManager:
 
     def __init__(self, operator_db_path: str):
         self._operator_db_path = operator_db_path
-        self._harness_variants = HarnessVariantManager(str(Path(operator_db_path).with_name("telemetry.db")))
+        telemetry_db = Path(operator_db_path).with_name("telemetry.db")
+        self._harness_variants = (
+            HarnessVariantManager(str(telemetry_db)) if telemetry_db.exists() else None
+        )
         self._available = self._verify_tables()
         if self._available:
             with self._connect() as conn:
@@ -473,7 +476,7 @@ class RuntimeControlManager:
         outcome_score: float,
         created_at: str,
     ) -> None:
-        if not self._harness_variants.available:
+        if self._harness_variants is None or not self._harness_variants.available:
             return
         self._harness_variants.log_skill_action_trace(
             task_id=task_id,

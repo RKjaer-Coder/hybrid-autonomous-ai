@@ -19,7 +19,11 @@ class ImmuneSystemSkill:
         self._config = load_config()
         self._buffer = verdict_buffer
         self._judge_lifecycle = None if immune_db_path is None else JudgeLifecycleManager(immune_db_path, self._config)
-        telemetry_db_path = None if immune_db_path is None else str(Path(immune_db_path).with_name("telemetry.db"))
+        telemetry_db_path = None
+        if immune_db_path is not None:
+            candidate = Path(immune_db_path).with_name("telemetry.db")
+            if candidate.exists():
+                telemetry_db_path = str(candidate)
         self._harness_variants = (
             None if telemetry_db_path is None else HarnessVariantManager(telemetry_db_path)
         )

@@ -53,7 +53,10 @@ class JudgeLifecycleManager:
     def __init__(self, immune_db_path: str, config: ImmuneConfig):
         self._immune_db_path = immune_db_path
         self._config = config
-        self._harness_variants = HarnessVariantManager(str(Path(immune_db_path).with_name("telemetry.db")))
+        telemetry_db = Path(immune_db_path).with_name("telemetry.db")
+        self._harness_variants = (
+            HarnessVariantManager(str(telemetry_db)) if telemetry_db.exists() else None
+        )
         operator_db = Path(immune_db_path).with_name("operator_digest.db")
         self._operator_db_path = str(operator_db) if operator_db.exists() else None
         self._runtime_control = None if self._operator_db_path is None else RuntimeControlManager(self._operator_db_path)
@@ -877,7 +880,7 @@ class JudgeLifecycleManager:
         outcome_score: float,
         created_at: str,
     ) -> None:
-        if not self._harness_variants.available:
+        if self._harness_variants is None or not self._harness_variants.available:
             return
         self._harness_variants.log_skill_action_trace(
             task_id=task_id,

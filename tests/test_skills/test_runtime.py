@@ -53,6 +53,21 @@ def test_migrate_runtime_databases_builds_all_sqlite_files(tmp_path):
     assert (tmp_path / "data" / "operator_digest.db").exists()
 
 
+def test_runtime_control_manager_does_not_create_telemetry_db_when_missing(tmp_path):
+    operator_db = tmp_path / "operator_digest.db"
+    with sqlite3.connect(operator_db) as conn:
+        conn.executescript(Path("schemas/operator_digest.sql").read_text(encoding="utf-8"))
+        conn.commit()
+
+    telemetry_db = tmp_path / "telemetry.db"
+    assert not telemetry_db.exists()
+
+    manager = RuntimeControlManager(str(operator_db))
+
+    assert manager.available is True
+    assert not telemetry_db.exists()
+
+
 def test_make_session_context_uses_resolved_profile_and_data_dir(tmp_path):
     cfg = IntegrationConfig(data_dir=str(tmp_path / "data"), profile_name="hybrid-test")
     ctx = make_session_context(cfg, model_name="gpt-local")

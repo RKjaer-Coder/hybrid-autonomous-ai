@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 from harness_variants import HarnessVariantManager
 from immune.types import JudgePayload, Outcome, SheriffPayload
 from skills.immune_system.skill import ImmuneSystemSkill
@@ -84,3 +87,26 @@ def test_immune_skill_emits_replay_traces_when_telemetry_is_available(test_data_
         row["role"] == "immune_judge_check" and row["judge_verdict"] == "PASS"
         for row in immune_traces
     )
+
+
+def test_immune_skill_does_not_create_telemetry_db_when_missing(tmp_path):
+    immune_db = tmp_path / "immune_system.db"
+    with sqlite3.connect(immune_db) as conn:
+        conn.executescript(Path("schemas/immune_system.sql").read_text(encoding="utf-8"))
+        conn.commit()
+
+    telemetry_db = tmp_path / "telemetry.db"
+    assert not telemetry_db.exists()
+
+    skill = ImmuneSystemSkill(immune_db_path=str(immune_db))
+    verdict = skill.check_judge(
+        JudgePayload(
+            session_id="no-telemetry-session",
+            skill_name="x",
+            tool_name="t",
+            output={"ok": True},
+        )
+    )
+
+    assert verdict.outcome == Outcome.PASS
+    assert not telemetry_db.exists()
