@@ -127,6 +127,7 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     assert "area_status" in snapshot
     assert "usage" in snapshot
     assert "model_assignments" in snapshot
+    assert "overview_flow" in snapshot
     assert {area["name"] for area in snapshot["area_status"]}.isdisjoint({"Tasks", "System"})
     assert snapshot["overview"]["pending_gates"] == 1
     assert snapshot["workflow"]["projects"]["ACTIVE"] == 1
@@ -142,6 +143,13 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     assert snapshot["finance"]["summary"]["autonomous_paid_spend_enabled"] is False
     assert snapshot["system_map"]["nodes"][0]["id"] == "sense"
     assert snapshot["system_map"]["pressure"]["pending_decisions"] >= 1
+    assert snapshot["overview_flow"]["main_stages"][0]["id"] == "research_task"
+    assert [stage["id"] for stage in snapshot["overview_flow"]["branch_stages"]] == [
+        "council",
+        "task_backlog",
+        "further_research",
+    ]
+    assert snapshot["overview_flow"]["summary"]["pending_decisions"] >= 1
     assert snapshot["operator_focus"]["projects"][0]["focus_note"] == "Make the operator cockpit legible."
     assert any(lane["id"] == "BUILD" and lane["count"] == 1 for lane in snapshot["project_board"]["lanes"])
     assert any(card["kind"] == "manual" for card in snapshot["tasks"]["cards"])
@@ -220,12 +228,14 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "/api/plugins/hybrid-mission-control" in index_js
     assert "Final plugin shape" in index_js
     assert "System Logic Map" in index_js
+    assert "Intelligence to Action Flow" in index_js
+    assert "Routing Outcomes" in index_js
+    assert "Model selection" in index_js
     assert "Operator Focus" in index_js
     assert "Research Workflow Lanes" in index_js
     assert "Model Lifecycle" in index_js
     assert "Research to Opportunity Flow" in index_js
     assert "Local Resource Pressure" in index_js
-    assert "Area Status" in index_js
     assert "Token Accounting" in index_js
     assert "[\"usage\", \"Usage\"]" in index_js
     assert "[\"self_improvement\", \"Self-Improve\"]" in index_js

@@ -231,6 +231,7 @@ class MissionControlService:
         area_status = self.area_status(
             board, tasks, decisions, council, research, finance, replay, system, model_assignments
         )
+        overview_flow = self.overview_flow(board, tasks, decisions, council, research, model_assignments)
         return {
             "contract": FINAL_DASHBOARD_CONTRACT,
             "generated_at": _utc_now(),
@@ -245,6 +246,7 @@ class MissionControlService:
             "usage": usage,
             "model_assignments": model_assignments,
             "area_status": area_status,
+            "overview_flow": overview_flow,
             "overview": {
                 "runtime_status": workspace["runtime_status"],
                 "replay_readiness": workspace["replay_readiness"],
@@ -271,6 +273,124 @@ class MissionControlService:
             "finance": finance,
             "replay": replay,
             "system": system,
+        }
+
+    def overview_flow(
+        self,
+        board: dict[str, Any],
+        tasks: dict[str, Any],
+        decisions: dict[str, Any],
+        council: dict[str, Any],
+        research: dict[str, Any],
+        model_assignments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        research_summary = research.get("summary") or {}
+        conversion = research.get("conversion_flow") or {}
+        conversion_stages = {stage.get("id"): stage for stage in conversion.get("stages", [])}
+        task_cards = tasks.get("cards", [])
+        backlog_cards = [card for card in task_cards if card.get("lane") in {"TODO", "IN_PROGRESS", "BLOCKED"}]
+        pending_gates = decisions.get("pending_gates", [])
+        pending_quarantines = decisions.get("pending_quarantines", [])
+        pending_g3 = decisions.get("pending_g3_requests", [])
+        council_summary = council.get("summary") or {}
+        opportunity_count = int((conversion_stages.get("opportunity") or {}).get("count") or 0)
+        pending_decisions = len(pending_gates) + len(pending_quarantines) + len(pending_g3)
+        follow_up_count = int(research_summary.get("pending_harvests") or 0)
+        follow_up_count += sum(int(item.get("blocked") or 0) for item in research.get("workflows", []))
+
+        def stage(
+            stage_id: str,
+            label: str,
+            detail: str,
+            *,
+            count: int,
+            status: str,
+            area: str,
+            pending: int = 0,
+            blocked: int = 0,
+        ) -> dict[str, Any]:
+            return {
+                "id": stage_id,
+                "label": label,
+                "detail": detail,
+                "count": count,
+                "status": status,
+                "pending": pending,
+                "blocked": blocked,
+                "models": self._models_for_area(model_assignments, area),
+            }
+
+        return {
+            "status": "operator_needed" if pending_decisions else ("blocked" if follow_up_count else "flowing"),
+            "summary": {
+                "pending_decisions": pending_decisions,
+                "active_research": int((conversion_stages.get("task") or {}).get("count") or 0),
+                "actionable_findings": int((conversion_stages.get("action_signal") or {}).get("count") or 0),
+                "opportunity_candidates": opportunity_count,
+                "backlog_items": len(backlog_cards),
+                "follow_up_research": follow_up_count,
+            },
+            "main_stages": [
+                stage(
+                    "research_task",
+                    "Research Tasks",
+                    "Assigned, standing, council-requested, or operator-prompted questions.",
+                    count=int((conversion_stages.get("task") or {}).get("count") or 0),
+                    pending=int((research_summary.get("tasks_by_status") or {}).get("PENDING", 0)),
+                    blocked=sum(int(item.get("blocked") or 0) for item in research.get("workflows", [])),
+                    status="active",
+                    area="Research",
+                ),
+                stage(
+                    "finding",
+                    "Findings",
+                    "Structured intelligence briefs with confidence, uncertainty, and actionability.",
+                    count=int((conversion_stages.get("brief") or {}).get("count") or 0),
+                    pending=int((conversion_stages.get("action_signal") or {}).get("count") or 0),
+                    status="active" if int((conversion_stages.get("brief") or {}).get("count") or 0) else "quiet",
+                    area="Research",
+                ),
+                stage(
+                    "opportunity",
+                    "Opportunities",
+                    "Research findings that create or strengthen a candidate opportunity.",
+                    count=opportunity_count,
+                    pending=opportunity_count,
+                    status="active" if opportunity_count else "quiet",
+                    area="Projects",
+                ),
+            ],
+            "branch_stages": [
+                stage(
+                    "council",
+                    "Council Review",
+                    "Important or risky findings are routed through deliberation and hard gates.",
+                    count=int(council_summary.get("total_verdicts") or 0),
+                    pending=pending_decisions,
+                    status="attention" if pending_decisions else "active",
+                    area="Council",
+                ),
+                stage(
+                    "task_backlog",
+                    "Task Backlog",
+                    "Approved work becomes operator or system tasks for execution.",
+                    count=len(backlog_cards),
+                    pending=sum(1 for card in backlog_cards if card.get("lane") in {"TODO", "IN_PROGRESS"}),
+                    blocked=sum(1 for card in backlog_cards if card.get("lane") == "BLOCKED"),
+                    status="blocked" if any(card.get("lane") == "BLOCKED" for card in backlog_cards) else ("active" if backlog_cards else "quiet"),
+                    area="Projects",
+                ),
+                stage(
+                    "further_research",
+                    "Further Research",
+                    "Thin, stale, or manually blocked findings loop back for more evidence.",
+                    count=follow_up_count,
+                    pending=int(research_summary.get("pending_harvests") or 0),
+                    blocked=max(follow_up_count - int(research_summary.get("pending_harvests") or 0), 0),
+                    status="attention" if follow_up_count else "quiet",
+                    area="Research",
+                ),
+            ],
         }
 
     def workflow(self) -> dict[str, Any]:
@@ -2702,6 +2822,51 @@ def seed_demo_state(data_dir: str) -> dict[str, Any]:
                 created_at,
                 (now - datetime.timedelta(hours=idx + 2)).isoformat() if phase_status == "GATE_PENDING" else None,
                 None,
+            ),
+        )
+
+    route_rows = [
+        ("route-demo-research", "research-demo-4", None, "Embedding", "local", "bge-m3-local", "Research brief retrieval and clustering."),
+        ("route-demo-council", None, None, "Validation", "subscription", "gpt-5.2", "Council validation for elevated findings."),
+        ("route-demo-execution", None, "proj-demo-1", "Execution", "local", "qwen3-coder-30b-a3b", "Mission Control implementation work."),
+        ("route-demo-primary", None, "proj-demo-1", "Primary Reasoning", "local", "demo-frontier-local-32b", "Planning and synthesis shadow candidate."),
+        ("route-demo-training", None, None, "Training/Reward", "local", "judge-replay-local", "Harness trace review below activation threshold."),
+    ]
+    for idx, (decision_id, task_id, project_id, role, route_selected, model_used, justification) in enumerate(route_rows):
+        financial.execute(
+            """
+            INSERT INTO routing_decisions (
+                decision_id, task_id, chain_id, role, route_selected, model_used,
+                commercial_use_ok, quality_warning, cost_usd, justification,
+                g3_required, g3_status, reservation_id, created_at, project_id,
+                session_id, correlation_id, cost_status, approval_request_id,
+                dispatch_status, dispatched_at, finalized_at, final_cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                task_id,
+                "mission-control-preview",
+                role,
+                route_selected,
+                model_used,
+                1,
+                0,
+                0.0,
+                justification,
+                0,
+                None,
+                None,
+                (now - datetime.timedelta(minutes=45 - idx * 3)).isoformat(),
+                project_id,
+                "preview-session",
+                f"preview-{idx}",
+                "NOT_APPLICABLE",
+                None,
+                "FINALIZED",
+                (now - datetime.timedelta(minutes=44 - idx * 3)).isoformat(),
+                (now - datetime.timedelta(minutes=43 - idx * 3)).isoformat(),
+                0.0,
             ),
         )
 

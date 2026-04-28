@@ -705,14 +705,82 @@
     );
   }
 
+  function FlowModelList(props) {
+    var models = props.models || [];
+    return h("div", {className: "mc-flow-models"},
+      h("small", null, "Model selection"),
+      models.length ? models.map(function (model, index) {
+        return h("div", {className: "mc-flow-model", key: (model.role || "role") + index},
+          h("span", null, model.role || "Role"),
+          h("strong", null, model.model || "unassigned"),
+          h("em", null, (model.route || "route") + " · " + fmt(model.count || 0) + " runs")
+        );
+      }) : h("span", {className: "mc-muted"}, "No route telemetry yet")
+    );
+  }
+
+  function FlowStage(props) {
+    var stage = props.stage || {};
+    return h("section", {className: "mc-flow-card " + (stage.status || "quiet")},
+      h("div", {className: "mc-card-top"},
+        h("div", {className: "mc-area-title"},
+          h("span", {className: "mc-status-light " + (stage.status === "attention" ? "yellow" : (stage.status === "blocked" ? "red" : "green"))}),
+          h("strong", null, stage.label)
+        ),
+        h("span", {className: "mc-pill"}, statusLabel(stage.status || "quiet"))
+      ),
+      h("div", {className: "mc-flow-count-row"},
+        h("strong", null, fmt(stage.count || 0)),
+        h("span", null, stage.detail)
+      ),
+      h(MiniRows, {items: [
+        ["Pending", stage.pending || 0],
+        ["Blocked", stage.blocked || 0]
+      ], limit: 2}),
+      h(FlowModelList, {models: stage.models || []})
+    );
+  }
+
+  function OverviewFlow(props) {
+    var flow = (props.snapshot || {}).overview_flow || {};
+    var summary = flow.summary || {};
+    var status = flow.status || "unknown";
+    var statusText = status === "operator_needed" ? "Operator decision needed" : (status === "blocked" ? "System blocked" : "System flowing");
+    return h("div", {className: "mc-overview-flow"},
+      h("div", {className: "mc-status-strip mc-flow-strip"},
+        h("div", {className: "mc-status-main"},
+          h("span", {className: "mc-status-light " + (status === "operator_needed" ? "yellow" : (status === "blocked" ? "red" : "green"))}),
+          h("strong", null, statusText),
+          h("small", null, fmt(summary.pending_decisions || 0) + " decisions · " + fmt(summary.follow_up_research || 0) + " research follow-ups")
+        ),
+        h("div", {className: "mc-status-meters"},
+          h("span", null, "Research ", h("strong", null, fmt(summary.active_research || 0))),
+          h("span", null, "Findings ", h("strong", null, fmt(summary.actionable_findings || 0))),
+          h("span", null, "Opportunities ", h("strong", null, fmt(summary.opportunity_candidates || 0))),
+          h("span", null, "Backlog ", h("strong", null, fmt(summary.backlog_items || 0)))
+        )
+      ),
+      h(ShellCard, {title: "Intelligence to Action Flow", aside: "research -> findings -> opportunity"},
+        h("div", {className: "mc-flow-main"}, (flow.main_stages || []).map(function (stage, index) {
+          return h("div", {className: "mc-flow-main-wrap", key: stage.id},
+            h(FlowStage, {stage: stage}),
+            index < (flow.main_stages || []).length - 1 ? h("span", {className: "mc-map-arrow"}, "->") : null
+          );
+        }))
+      ),
+      h(ShellCard, {title: "Routing Outcomes", aside: "what happens next"},
+        h("div", {className: "mc-flow-branches"}, (flow.branch_stages || []).map(function (stage) {
+          return h(FlowStage, {key: stage.id, stage: stage});
+        }))
+      )
+    );
+  }
+
   function Overview(props) {
     var snapshot = props.snapshot || {};
     return h("div", {className: "mc-overview-grid"},
-      h(SystemStatusStrip, {snapshot: snapshot}),
-      h(SystemMap, {snapshot: snapshot}),
-      h(ShellCard, {title: "Area Status", className: "mc-span"},
-        h(AreaStatusGrid, {snapshot: snapshot})
-      )
+      h(OverviewFlow, {snapshot: snapshot}),
+      h(FocusQueue, {snapshot: snapshot})
     );
   }
 
