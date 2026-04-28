@@ -13,7 +13,7 @@ The bundle is intentionally small:
 - no Node bridge, Vite server, WebSocket fanout, or bundled React
 
 The dashboard covers Overview, Workflow, Projects, Tasks, Council, Research,
-Finance, Replay, System, and Decisions from the single
+Finance, Self-Improve, Usage, System, and Decisions from the single
 `MissionControlService.snapshot()` contract.
 
 Install it through the runtime profile installer:

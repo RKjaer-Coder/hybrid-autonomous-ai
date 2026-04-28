@@ -105,13 +105,29 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     operator.commit()
 
     service = MissionControlService(db)
-    service.set_project_priority("proj-1", "P0_IMMEDIATE")
+    service.set_project_priority("proj-1", "P0_IMMEDIATE", "Make the operator cockpit legible.")
     service.create_manual_task(title="Review workflow board", priority="P1_HIGH", status="TODO", project_id="proj-1")
+    created_research = service.create_research_task(
+        title="Assess architecture change",
+        brief="Check whether a system change should become an opportunity.",
+        workflow_id="system_architecture",
+        domain=2,
+        priority="P1_HIGH",
+        depth="FULL",
+    )
     snapshot = service.snapshot()
 
     assert snapshot["contract"] == "hermes-dashboard-plugin-v1"
     assert snapshot["runtime_posture"]["mode"] == "prebuilt_without_live_hermes"
     assert snapshot["runtime_posture"]["heavy_services"] == []
+    assert "resource_pressure" in snapshot
+    assert "cpu" in snapshot["resource_pressure"]
+    assert "ram" in snapshot["resource_pressure"]
+    assert "gpu" in snapshot["resource_pressure"]
+    assert "area_status" in snapshot
+    assert "usage" in snapshot
+    assert "model_assignments" in snapshot
+    assert {area["name"] for area in snapshot["area_status"]}.isdisjoint({"Tasks", "System"})
     assert snapshot["overview"]["pending_gates"] == 1
     assert snapshot["workflow"]["projects"]["ACTIVE"] == 1
     assert "council" in snapshot
@@ -119,9 +135,18 @@ def test_mission_control_snapshot_surfaces_workflow_board_and_tasks(test_data_di
     assert "finance" in snapshot
     assert "replay" in snapshot
     assert "system" in snapshot
+    assert "system_map" in snapshot
+    assert "operator_focus" in snapshot
+    assert "workflows" in snapshot["research"]
+    assert "conversion_flow" in snapshot["research"]
     assert snapshot["finance"]["summary"]["autonomous_paid_spend_enabled"] is False
+    assert snapshot["system_map"]["nodes"][0]["id"] == "sense"
+    assert snapshot["system_map"]["pressure"]["pending_decisions"] >= 1
+    assert snapshot["operator_focus"]["projects"][0]["focus_note"] == "Make the operator cockpit legible."
     assert any(lane["id"] == "BUILD" and lane["count"] == 1 for lane in snapshot["project_board"]["lanes"])
     assert any(card["kind"] == "manual" for card in snapshot["tasks"]["cards"])
+    assert created_research["priority"] == "P1_HIGH"
+    assert any(card["kind"] == "research" and card["id"] == created_research["task_id"] for card in snapshot["tasks"]["cards"])
     assert any(card["priority"] == "P0_IMMEDIATE" for card in snapshot["project_board"]["cards"])
 
 
@@ -194,12 +219,26 @@ def test_hermes_dashboard_plugin_artifacts_are_tiny_and_harness_backed():
     assert "window.__HERMES_PLUGINS__.register(\"hybrid-mission-control\"" in index_js
     assert "/api/plugins/hybrid-mission-control" in index_js
     assert "Final plugin shape" in index_js
+    assert "System Logic Map" in index_js
+    assert "Operator Focus" in index_js
+    assert "Research Workflow Lanes" in index_js
+    assert "Model Lifecycle" in index_js
+    assert "Research to Opportunity Flow" in index_js
+    assert "Local Resource Pressure" in index_js
+    assert "Area Status" in index_js
+    assert "Token Accounting" in index_js
+    assert "[\"usage\", \"Usage\"]" in index_js
+    assert "[\"self_improvement\", \"Self-Improve\"]" in index_js
+    assert "Models in motion" in index_js
+    assert "System Alerts" in index_js
+    assert "/research-tasks" in index_js
+    assert "focus_note" in index_js
     assert "No bundled React, no Node bridge, no live stream server" in index_js
     assert "Below Threshold" in index_js
     assert "setInterval(refresh, 15000)" in index_js
     assert "\"council\", \"Council\"" in index_js
     assert "\"finance\", \"Finance\"" in index_js
-    assert "\"replay\", \"Replay\"" in index_js
+    assert "\"replay\", \"Replay\"" not in index_js
     assert "MissionControlService" in plugin_api
     assert "review_g3" not in plugin_api
     assert "review_quarantine" not in plugin_api
