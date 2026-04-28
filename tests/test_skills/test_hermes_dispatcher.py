@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from council.types import RoleName
-from skills.hermes_dispatcher import HermesSubagentDispatcher
+from skills.hermes_dispatcher import HermesSubagentDispatcher, run_subagent_isolation_canary
 from skills.hermes_interfaces import MockHermesRuntime
 
 
@@ -68,3 +68,22 @@ def test_role_isolation(role):
     d = HermesSubagentDispatcher(rt)
     out = d.dispatch_parallel([(role, "sys", "user")])
     assert out[0].content == f"isolation:{role.value}"
+
+
+def test_subagent_isolation_canary_passes_when_markers_do_not_leak():
+    rt = MockHermesRuntime()
+
+    result = run_subagent_isolation_canary(rt)
+
+    assert result["ok"] is True
+    assert all(result["checks"].values())
+
+
+def test_subagent_isolation_canary_fails_on_parallel_marker_leak():
+    rt = MockHermesRuntime()
+    rt.set_mock_response("delegate:isolation_A", "MARKER_A MARKER_B")
+
+    result = run_subagent_isolation_canary(rt)
+
+    assert result["ok"] is False
+    assert any("parallel A" in item for item in result["details"])

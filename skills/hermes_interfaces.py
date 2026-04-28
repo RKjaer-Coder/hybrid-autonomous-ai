@@ -126,7 +126,8 @@ class MockHermesRuntime(
         self.delegate_calls.append({"mode": "parallel", "tasks": tasks, "max_concurrency": max_concurrency})
         results: List[HermesToolResult] = []
         for name, system_prompt, user_prompt in tasks:
-            mock = self._mock_responses.get(f"delegate:{name}", f"{name}::{len(system_prompt)}::{len(user_prompt)}")
+            default = _default_delegate_response(name, system_prompt, user_prompt)
+            mock = self._mock_responses.get(f"delegate:{name}", default)
             if isinstance(mock, Exception):
                 results.append(HermesToolResult(tool_name=name, success=False, output=None, error=str(mock)))
             else:
@@ -135,7 +136,7 @@ class MockHermesRuntime(
 
     def delegate_sequential(self, name: str, system_prompt: str, user_prompt: str) -> HermesToolResult:
         self.delegate_calls.append({"mode": "sequential", "name": name, "system_prompt": system_prompt, "user_prompt": user_prompt})
-        mock = self._mock_responses.get(f"delegate:{name}", f"{name}::{len(system_prompt)}::{len(user_prompt)}")
+        mock = self._mock_responses.get(f"delegate:{name}", _default_delegate_response(name, system_prompt, user_prompt))
         if isinstance(mock, Exception):
             return HermesToolResult(tool_name=name, success=False, output=None, error=str(mock))
         return HermesToolResult(tool_name=name, success=True, output=mock)
@@ -160,3 +161,13 @@ class MockHermesRuntime(
 
     def cancel_job(self, job_id: str) -> bool:
         return self.scheduled_jobs.pop(job_id, None) is not None
+
+
+def _default_delegate_response(name: str, system_prompt: str, user_prompt: str) -> str:
+    if name.startswith("isolation_"):
+        suffix = name.rsplit("_", 1)[-1]
+        if suffix in {"A", "B", "C", "D"}:
+            return f"MARKER_{suffix}"
+        if suffix == "memory":
+            return "MEMORY.md is empty for this isolated subagent."
+    return f"{name}::{len(system_prompt)}::{len(user_prompt)}"

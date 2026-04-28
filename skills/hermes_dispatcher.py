@@ -9,6 +9,9 @@ from council.types import RoleName, RoleOutput
 from skills.hermes_interfaces import HermesDelegateAPI, HermesMixtureAPI, HermesToolResult
 
 
+ISOLATION_CANARY_KEY = "subagent_isolation_test"
+
+
 class HermesSubagentDispatcher(SubagentDispatcher):
     def __init__(self, delegate_api: HermesDelegateAPI):
         self._delegate = delegate_api
@@ -52,3 +55,61 @@ class HermesMixtureDispatcher(MixtureDispatcher):
         if isinstance(result.output, (dict, list)):
             return json.dumps(result.output)
         return str(result.output)
+
+
+def run_subagent_isolation_canary(delegate_api: HermesDelegateAPI) -> dict:
+    """Run the §3.1.5 Hermes delegate isolation canary."""
+    markers = {"A": "MARKER_A", "B": "MARKER_B", "C": "MARKER_C"}
+    parallel_tasks = [
+        (
+            f"isolation_{name}",
+            "You are an isolation canary subagent. Return only visible marker values.",
+            (
+                f"Write {marker} to shared namespace key {ISOLATION_CANARY_KEY}. "
+                f"Then read {ISOLATION_CANARY_KEY} and return all marker values you can see."
+            ),
+        )
+        for name, marker in markers.items()
+    ]
+    checks: dict[str, bool] = {}
+    details: list[str] = []
+    try:
+        parallel = delegate_api.delegate_parallel(parallel_tasks, max_concurrency=3)
+        for name, marker in markers.items():
+            result = parallel[ord(name) - ord("A")]
+            text = str(result.output)
+            other_markers = set(markers.values()) - {marker}
+            ok = result.success and marker in text and not any(other in text for other in other_markers)
+            checks[f"parallel_{name}"] = ok
+            if not ok:
+                details.append(f"parallel {name} saw unexpected marker set: {text}")
+
+        sequential = delegate_api.delegate_sequential(
+            "isolation_D",
+            "You are an isolation canary subagent. Return only visible marker values.",
+            f"Write MARKER_D to {ISOLATION_CANARY_KEY}. Then read {ISOLATION_CANARY_KEY} and return all values.",
+        )
+        sequential_text = str(sequential.output)
+        sequential_ok = (
+            sequential.success
+            and "MARKER_D" in sequential_text
+            and not any(marker in sequential_text for marker in markers.values())
+        )
+        checks["sequential_D"] = sequential_ok
+        if not sequential_ok:
+            details.append(f"sequential D saw leaked markers: {sequential_text}")
+
+        memory = delegate_api.delegate_sequential(
+            "isolation_memory",
+            "You are an isolation canary subagent. Inspect only your own MEMORY.md.",
+            "Read your MEMORY.md. Return whether it contains PARENT_CONTEXT and include the visible contents.",
+        )
+        memory_text = str(memory.output)
+        memory_ok = memory.success and "PARENT_CONTEXT" not in memory_text
+        checks["parent_memory"] = memory_ok
+        if not memory_ok:
+            details.append("parent MEMORY.md leaked into delegated subagent")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "checks": checks, "details": [f"canary_error:{type(exc).__name__}:{exc}"]}
+
+    return {"ok": all(checks.values()), "checks": checks, "details": details}

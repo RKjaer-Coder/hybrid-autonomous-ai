@@ -1,25 +1,18 @@
 # Hybrid Autonomous AI
 
-Implementation baseline for a hybrid, local-first autonomous intelligence
-system built on Hermes Agent.
+Implementation repo for a hybrid, local-first autonomous intelligence system
+built on Hermes Agent.
 
-The repo is pre-live: the codebase is real, tested, and already carries the
-core runtime, governance, routing, council, research, operator, and replay
-substrates, but live Hermes attachment on the target machine is still pending.
-The launch posture is prebuilt-first: Hermes on the Mac Studio should attach
-to an already-built system, validate it, and operate it rather than build the
-application logic from scratch.
+For stable workspace rules, read `../WORKSPACE.md` first. For live status,
+current blockers, and latest verification, use `../CURRENT_STATE.md`.
 
-## If You Just Want The Safe Version
+## Orientation
 
-- Use branch `main`
-- Ignore old feature branches unless you are doing git history work
-- Read the workspace docs in this order:
-  `../WORKSPACE.md`, `../CURRENT_STATE.md`, then this file
+- Use branch `main` as the stable integration baseline.
+- Ignore old feature branches unless you are doing git history work.
+- Treat this README as a repo runbook, not a rolling project-status document.
 
-## What To Run Next
-
-If you want the highest-value workflow today:
+## Common Workflows
 
 1. Run `python3 -m pytest -q`
 2. Run `python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cycles 5`
@@ -27,39 +20,7 @@ If you want the highest-value workflow today:
 4. Run `python3 -m skills.runtime --export-replay-corpus`
 5. Run `python3 -m skills.runtime --optimizer-snapshot`
 6. Run `python3 -m skills.runtime --analyze-harness-candidates`
-
-## Current State
-
-- Five-database SQLite baseline with migration and verification tooling
-- Financial router with typed routing, Path B / per-call G3 lifecycle, and
-  disputed-cost handling
-- Immune subsystem with Sheriff, Judge, bootstrap patching, audited fallback,
-  and deadlock-driven runtime halt/restart control
-- Council Tier 1 and Tier 2 orchestration, including multi-model deliberation,
-  G3-gated paid Tier 2 flow, degraded fallback, and operator/observability
-  surfacing
-- Research, strategic-memory, opportunity, operator, and observability skills
-- Repo-local Hermes contract harness, deterministic operator workflow proof,
-  and readiness/doctor flows
-- Standalone local forward proxy with generated allowlist artifact, audit log,
-  launcher, and repo-local `5 allow / 5 deny` self-test
-- Replayable `execution_traces` across runtime, council, research,
-  opportunity, and strategic-memory routing/writeback paths
-- Production evidence factory for repeated multi-skill corpus growth plus
-  detailed replay-readiness reporting
-- Replay corpus export, optimizer snapshot, and constrained harness-candidate
-  analysis/proposal flow for offline replay optimization
-- Mac Studio day-one handoff bundle that composes bootstrap proofs, evidence
-  growth, and cutover commands into one generated package
-- §8.3b harness-variant substrate with replay-readiness guardrails and
-  explicit operator acknowledgement for below-threshold shadow replay
-- CI on `main`, `codex/**`, and PRs to `main`
-
-## What This Repo Is Not Yet
-
-- A verified live Hermes deployment
-- Proof of end-to-end autonomy on the real Mac Studio environment
-- The full target-state architecture running live without operator gating
+7. Run `python3 -m skills.runtime --install-profile`, then `hermes dashboard --no-open`
 
 ## Repository Layout
 
@@ -96,6 +57,11 @@ Verify the schema baseline:
 ```bash
 python3 migrate.py --db-dir ./data --verify
 ```
+
+Runtime launch paths fail closed on schema drift. `migrate.py --verify` checks
+table SQL semantics, including CHECK constraints and STRICT tables, and the
+runtime refuses to boot if any deployed database does not match the current
+schema contract.
 
 Run the full test suite:
 
@@ -146,6 +112,23 @@ Capture a runtime/bootstrap snapshot plus replay summary:
 python3 -m skills.runtime --optimizer-snapshot
 ```
 
+Start the lean local operator UI:
+
+```bash
+python3 -m skills.runtime --mission-control
+```
+
+Install the Hermes-native Mission Control dashboard plugin:
+
+```bash
+python3 -m skills.runtime --install-profile
+hermes dashboard --no-open
+```
+
+The standalone Mission Control server is now a prototype and API-contract
+harness. The deployable operator UI target is the `hybrid-mission-control`
+Hermes dashboard plugin installed under `~/.hermes/plugins/`.
+
 Rank constrained harness candidates from real replay evidence:
 
 ```bash
@@ -170,6 +153,10 @@ Check live-Hermes readiness on a machine with Hermes installed:
 python3 -m skills.runtime --readiness
 ```
 
+Readiness also requires the Council delegate isolation canary and the repo-local
+v0.11 policy adapter contract before Council Tier 1 or paid-capable operation is
+treated as launch-safe.
+
 ## Useful Commands
 
 ```bash
@@ -188,8 +175,7 @@ python3 -m skills.runtime --mac-studio-day-one
 
 ## Working Description
 
-The best short description of this repository today is:
+The best short description of this repository is:
 
-> A strong pre-live implementation substrate with deterministic runtime proofs,
-> audited governance, and a production-quality repo baseline for Hermes
-> attachment.
+> The implementation surface for runtime, governance, routing, evaluation, and
+> Hermes integration work.

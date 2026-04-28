@@ -2,3 +2,7 @@
 Thumbs.db
 .pytest_cache/
 data/
+alerts/
+logs/
+profiles/
+skills/hybrid-autonomous-ai/

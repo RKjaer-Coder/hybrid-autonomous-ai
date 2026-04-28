@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 
@@ -97,6 +98,8 @@ EXPECTED_OBJECTS = {
             "gate_log",
             "operator_heartbeat",
             "operator_load_tracking",
+            "operator_project_preferences",
+            "operator_manual_tasks",
             "runtime_control_state",
             "runtime_halt_events",
             "runtime_restart_history",
@@ -105,7 +108,9 @@ EXPECTED_OBJECTS = {
             "idx_alert_log_tier_created", "idx_alert_log_type_created", "idx_harvest_requests_status_expires",
             "idx_harvest_requests_priority_status", "idx_harvest_requests_task_id", "idx_gate_log_status",
             "idx_gate_log_type_created", "idx_gate_log_project_id", "idx_operator_heartbeat_timestamp_desc",
-            "idx_operator_load_tracking_week_start", "idx_runtime_halt_events_status_created",
+            "idx_operator_load_tracking_week_start", "idx_operator_project_preferences_priority_updated",
+            "idx_operator_manual_tasks_status_priority", "idx_operator_manual_tasks_project_status",
+            "idx_runtime_halt_events_status_created",
             "idx_runtime_halt_events_source_created", "idx_runtime_restart_history_status_requested",
             "idx_runtime_restart_history_halt_requested",
         },
@@ -199,6 +204,56 @@ def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_routing_decisions_dispatch_status ON routing_decisions(dispatch_status, created_at)"
             )
+        return
+    if schema_name == "operator_digest.sql":
+        _rebuild_operator_heartbeat_for_dashboard_channel(conn)
+
+
+def _normalized_sql(sql: str | None) -> str:
+    if not sql:
+        return ""
+    return re.sub(r"\s+", " ", sql.strip()).lower()
+
+
+def _object_sql(conn: sqlite3.Connection, obj_type: str, name: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+        (obj_type, name),
+    ).fetchone()
+    return "" if row is None else str(row[0] or "")
+
+
+def _rebuild_operator_heartbeat_for_dashboard_channel(conn: sqlite3.Connection) -> None:
+    """Rebuild old operator_heartbeat CHECK constraints that predate Hermes dashboard."""
+    existing_sql = _object_sql(conn, "table", "operator_heartbeat")
+    if not existing_sql or "hermes_dashboard" in existing_sql:
+        return
+    conn.execute("ALTER TABLE operator_heartbeat RENAME TO operator_heartbeat__old")
+    conn.execute(
+        """
+        CREATE TABLE operator_heartbeat (
+          entry_id TEXT PRIMARY KEY,
+          interaction_type TEXT NOT NULL CHECK (interaction_type IN ('message', 'gate_response', 'digest_ack', 'command')),
+          channel TEXT NOT NULL CHECK (channel IN ('CLI', 'mission_control', 'hermes_dashboard', 'telegram', 'discord', 'slack')),
+          timestamp TEXT NOT NULL
+        ) STRICT
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO operator_heartbeat(entry_id, interaction_type, channel, timestamp)
+        SELECT entry_id, interaction_type, channel, timestamp
+        FROM operator_heartbeat__old
+        """
+    )
+    conn.execute("DROP TABLE operator_heartbeat__old")
+
+
+def _db_name_for_schema(schema_name: str) -> str | None:
+    for db_name, schema_rel in SCHEMAS.items():
+        if Path(schema_rel).name == schema_name:
+            return db_name
+    return None
 
 
 def _schema_hash(schema_path: Path) -> str:
@@ -207,8 +262,11 @@ def _schema_hash(schema_path: Path) -> str:
 
 def _table_signature(conn: sqlite3.Connection, table_name: str) -> list[tuple]:
     cols = conn.execute(f"PRAGMA table_xinfo('{table_name}')").fetchall()
-    # cid, name, type, notnull, dflt_value, pk, hidden
-    return [(c[1], c[2], c[3], c[5], c[6]) for c in cols]
+    # cid, name, type, notnull, dflt_value, pk, hidden, plus table SQL for CHECK/FK/STRICT drift.
+    return [
+        ("__table_sql__", _normalized_sql(_object_sql(conn, "table", table_name))),
+        *[(c[1], c[2], c[3], c[4], c[5], c[6]) for c in cols],
+    ]
 
 
 def _index_signature(conn: sqlite3.Connection, index_name: str) -> tuple[int, list[tuple]]:
@@ -217,7 +275,37 @@ def _index_signature(conn: sqlite3.Connection, index_name: str) -> tuple[int, li
     key_cols = [(r[2], r[3], r[4], r[5]) for r in info if r[5] == 1]
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name = ?", (index_name,)).fetchone()
     is_unique = 1 if row and row[0] and "unique index" in row[0].lower() else 0
-    return is_unique, key_cols
+    return is_unique, key_cols, _normalized_sql(_object_sql(conn, "index", index_name))
+
+
+def _schema_fidelity_errors(conn: sqlite3.Connection, db_name: str, schema_path: Path) -> list[str]:
+    expected = EXPECTED_OBJECTS[db_name]
+    errors: list[str] = []
+    expected_table_sigs, expected_index_sigs = _semantic_schema_signatures(schema_path)
+
+    objects = conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('table','index')"
+    ).fetchall()
+    tables = {name for obj_type, name in objects if obj_type == "table" and not name.startswith("sqlite_")}
+    indexes = {name for obj_type, name in objects if obj_type == "index" and not name.startswith("sqlite_")}
+
+    missing_tables = sorted(expected["tables"] - tables)
+    missing_indexes = sorted(expected["indexes"] - indexes)
+    if missing_tables:
+        errors.append(f"missing tables: {', '.join(missing_tables)}")
+    if missing_indexes:
+        errors.append(f"missing indexes: {', '.join(missing_indexes)}")
+
+    for table in sorted(expected["tables"] & expected_table_sigs.keys()):
+        actual_sig = _table_signature(conn, table)
+        if actual_sig != expected_table_sigs[table]:
+            errors.append(f"table drift detected for {table}")
+
+    for index in sorted(expected["indexes"] & expected_index_sigs.keys()):
+        actual_idx = _index_signature(conn, index)
+        if actual_idx != expected_index_sigs[index]:
+            errors.append(f"index drift detected for {index}")
+    return errors
 
 
 def _semantic_schema_signatures(schema_path: Path) -> tuple[dict[str, list[tuple]], dict[str, tuple[int, list[tuple]]]]:
@@ -250,6 +338,7 @@ def apply_schema(db_path: Path, schema_path: Path) -> None:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         _preflight_schema_compat(conn, schema_path.name)
+        conn.commit()
         conn.execute("BEGIN")
         for statement in sql.split(";"):
             statement = statement.strip()
@@ -257,7 +346,9 @@ def apply_schema(db_path: Path, schema_path: Path) -> None:
                 conn.execute(statement)
         conn.commit()
         _ensure_schema_meta_table(conn)
-        _upsert_schema_meta(conn, schema_path.name, _schema_hash(schema_path))
+        db_name = _db_name_for_schema(schema_path.name)
+        if db_name is None or not _schema_fidelity_errors(conn, db_name, schema_path):
+            _upsert_schema_meta(conn, schema_path.name, _schema_hash(schema_path))
         conn.commit()
 
 
@@ -314,42 +405,24 @@ def _upsert_schema_meta(conn: sqlite3.Connection, schema_name: str, schema_hash:
 
 
 def verify_database(db_path: Path, db_name: str, schema_path: Path) -> tuple[bool, list[str]]:
-    expected = EXPECTED_OBJECTS[db_name]
     errors: list[str] = []
-    expected_table_sigs, expected_index_sigs = _semantic_schema_signatures(schema_path)
     with sqlite3.connect(db_path) as conn:
         mode = conn.execute("PRAGMA journal_mode;").fetchone()[0].lower()
         if mode != "wal":
             errors.append(f"journal_mode expected wal, got {mode}")
 
-        objects = conn.execute(
-            "SELECT type, name FROM sqlite_master WHERE type IN ('table','index')"
-        ).fetchall()
-        tables = {name for obj_type, name in objects if obj_type == "table" and not name.startswith("sqlite_")}
-        indexes = {name for obj_type, name in objects if obj_type == "index" and not name.startswith("sqlite_")}
+        # Semantic schema fidelity check includes column shape and normalized SQL so CHECK/FK/STRICT drift is visible.
+        errors.extend(_schema_fidelity_errors(conn, db_name, schema_path))
 
-        missing_tables = sorted(expected["tables"] - tables)
-        missing_indexes = sorted(expected["indexes"] - indexes)
-        if missing_tables:
-            errors.append(f"missing tables: {', '.join(missing_tables)}")
-        if missing_indexes:
-            errors.append(f"missing indexes: {', '.join(missing_indexes)}")
-
-        # Semantic schema fidelity check (column/index signatures), robust to SQL formatting/canonicalization.
-        for table in sorted(expected["tables"] & expected_table_sigs.keys()):
-            actual_sig = _table_signature(conn, table)
-            if actual_sig != expected_table_sigs[table]:
-                errors.append(f"table drift detected for {table}")
-
-        for index in sorted(expected["indexes"] & expected_index_sigs.keys()):
-            actual_idx = _index_signature(conn, index)
-            if actual_idx != expected_index_sigs[index]:
-                errors.append(f"index drift detected for {index}")
-
-        meta = conn.execute(
-            "SELECT schema_hash FROM _schema_meta WHERE schema_name = ?",
-            (schema_path.name,),
-        ).fetchone()
+        try:
+            meta = conn.execute(
+                "SELECT schema_hash FROM _schema_meta WHERE schema_name = ?",
+                (schema_path.name,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            meta = None
         if meta is None:
             errors.append("missing _schema_meta entry for schema")
         elif meta[0] != _schema_hash(schema_path):
