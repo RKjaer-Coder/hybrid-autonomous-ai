@@ -50,7 +50,8 @@ from migrate import SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
 from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig
-from skills.db_manager import CANONICAL_DATABASES, DatabaseManager
+from skills.db_manager import DatabaseManager
+from skills.hermes_dispatcher import run_subagent_isolation_canary
 from skills.hermes_interfaces import HermesSessionContext, HermesToolRegistry, MockHermesRuntime
 from skills.local_forward_proxy import ProxyServerConfig, start_proxy_server
 from skills.milestone_status import evaluate_milestone_status, runtime_support_artifact_paths
@@ -73,10 +74,10 @@ EXPECTED_SEED_TOOLS = (
     "shell_command",
 )
 LEGACY_SPLIT_DATABASES = ("opportunity.db", "project.db", "treasury.db")
-MANIFEST_HERMES_VERSION_FLOOR = (0, 10, 0)
-CHECKLIST_HERMES_VERSION_FLOOR = (0, 10, 0)
+MANIFEST_HERMES_VERSION_FLOOR = (0, 11, 0)
+CHECKLIST_HERMES_VERSION_FLOOR = (0, 11, 0)
 VERSION_DRIFT_NOTE = (
-    "spec drift: repo runtime now targets Hermes v0.10.0+ and treats "
+    "spec drift: repo runtime now targets Hermes v0.11.0+ and treats "
     "config.yaml as the primary upstream surface. Any remaining v0.8/v0.9 "
     "language should be considered stale."
 )
@@ -94,6 +95,7 @@ CONFIG_SURFACE_UNCERTAINTY_NOTE = (
 )
 DEFAULT_EVIDENCE_CYCLES = 5
 DEFAULT_REPLAY_REPORT_LIMIT = 10
+MISSION_CONTROL_DASHBOARD_PLUGIN = "hybrid-mission-control"
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,7 @@ class RuntimeProfileInstallResult:
     profile_config_path: str
     spec_profile_path: str
     profile_manifest_path: str
+    dashboard_plugin_path: str
     launcher_paths: dict[str, str]
     linked_skill_paths: list[str]
 
@@ -141,6 +144,7 @@ class RuntimeDoctorResult:
     config: IntegrationConfig
     path_status: dict[str, bool]
     database_status: dict[str, bool]
+    database_errors: dict[str, list[str]]
     registered_tools: list[str]
     missing_items: list[str]
     profile_manifest_path: str
@@ -189,6 +193,7 @@ class HermesReadinessResult:
     doctor: RuntimeDoctorResult
     contract_harness: HermesContractHarnessResult
     replay_report: dict[str, Any]
+    council_isolation_canary: dict[str, Any]
     recommended_actions: list[str]
 
 
@@ -726,6 +731,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
+        "mission_control": bin_dir / "start_mission_control.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",
         "milestone_status": bin_dir / "milestone_status.sh",
         "workspace_overview": bin_dir / "workspace_overview.sh",
@@ -746,6 +752,10 @@ def _runtime_profile_dir(config: IntegrationConfig) -> Path:
 
 def _runtime_logs_dir(config: IntegrationConfig) -> Path:
     return _runtime_root(config) / "logs"
+
+
+def _runtime_dashboard_plugin_dir(config: IntegrationConfig) -> Path:
+    return _runtime_root(config) / "plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
 
 
 def _runtime_profile_config_path(config: IntegrationConfig) -> Path:
@@ -1695,6 +1705,34 @@ def _symlink_skill_directory(source: Path, dest: Path) -> None:
         raise
 
 
+def _install_mission_control_dashboard_plugin(config: IntegrationConfig, repo_root: Path) -> Path:
+    source = repo_root / "hermes_plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
+    if not source.is_dir():
+        fallback = _repo_root() / "hermes_plugins" / MISSION_CONTROL_DASHBOARD_PLUGIN
+        source = fallback if fallback.is_dir() else source
+    if not source.is_dir():
+        raise FileNotFoundError(f"Missing dashboard plugin source: {source}")
+    plugin_dir = _runtime_dashboard_plugin_dir(config)
+    plugin_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, plugin_dir, dirs_exist_ok=True)
+    runtime_config = {
+        "repo_root": str(repo_root),
+        "data_dir": config.data_dir,
+        "profile_name": config.profile_name,
+        "interaction_channel": "hermes_dashboard",
+        "gate_actions_enabled": False,
+        "notes": [
+            "Installed by skills.runtime --install-profile.",
+            "Gate actions remain read-only until dashboard auth/audit validation passes.",
+        ],
+    }
+    (plugin_dir / "runtime_config.json").write_text(
+        f"{json.dumps(runtime_config, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+    return plugin_dir
+
+
 def _next_contract_harness_base_time(immune_db_path: Path, guard_hours: int) -> datetime.datetime:
     base_time = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
     if not immune_db_path.is_file():
@@ -1752,6 +1790,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         link_path = linked_skills_dir / skill_dir.name
         _symlink_skill_directory(skill_dir, link_path)
         linked_skill_paths.append(str(link_path))
+    dashboard_plugin_dir = _install_mission_control_dashboard_plugin(resolved, root)
 
     manifest = {
         "profile_name": resolved.profile_name,
@@ -1771,6 +1810,15 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
+        "dashboard_plugins": {
+            MISSION_CONTROL_DASHBOARD_PLUGIN: {
+                "path": str(dashboard_plugin_dir),
+                "manifest": str(dashboard_plugin_dir / "dashboard" / "manifest.json"),
+                "route": "/mission-control",
+                "api_base": f"/api/plugins/{MISSION_CONTROL_DASHBOARD_PLUGIN}",
+                "gate_actions_enabled": False,
+            }
+        },
         "data_dir": resolved.data_dir,
         "skills_dir": resolved.skills_dir,
         "checkpoints_dir": resolved.checkpoints_dir,
@@ -1797,6 +1845,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
+            "mission_control": _command_string(resolved, "--mission-control", root),
         },
     }
     manifest_path = _runtime_profile_manifest_path(resolved)
@@ -1834,6 +1883,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
+    _write_launcher(launcher_paths["mission_control"], resolved, root, "--mission-control")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
     _write_env_launcher(
         launcher_paths["start_proxy"],
@@ -1872,6 +1922,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         profile_config_path=str(_runtime_profile_config_path(resolved)),
         spec_profile_path=str(_runtime_spec_profile_path(resolved)),
         profile_manifest_path=str(manifest_path),
+        dashboard_plugin_path=str(dashboard_plugin_dir),
         launcher_paths={name: str(path) for name, path in launcher_paths.items()},
         linked_skill_paths=linked_skill_paths,
     )
@@ -1889,6 +1940,43 @@ def migrate_runtime_databases(config: IntegrationConfig) -> dict[str, bool]:
         apply_schema(db_path, schema_path)
         ok, _errors = verify_database(db_path, db_name, schema_path)
         status[db_name] = ok
+    return status
+
+
+def verify_runtime_databases(config: IntegrationConfig) -> tuple[dict[str, bool], dict[str, list[str]]]:
+    """Verify deployed runtime databases against current schema contracts."""
+    resolved = _normalize_runtime_layout(config).resolve_paths()
+    root = Path(__file__).resolve().parents[1]
+    data_dir = Path(resolved.data_dir)
+    status: dict[str, bool] = {}
+    errors: dict[str, list[str]] = {}
+    for db_name, schema_rel in SCHEMAS.items():
+        db_path = data_dir / f"{db_name}.db"
+        schema_path = root / schema_rel
+        if not db_path.is_file():
+            status[db_name] = False
+            errors[db_name] = [f"missing database: {db_path}"]
+            continue
+        ok, db_errors = verify_database(db_path, db_name, schema_path)
+        status[db_name] = ok
+        if db_errors:
+            errors[db_name] = db_errors
+    return status, errors
+
+
+def require_runtime_databases(config: IntegrationConfig) -> dict[str, bool]:
+    """Apply schemas and fail closed unless every DB verifies cleanly."""
+    resolved = _normalize_runtime_layout(config).resolve_paths()
+    status = migrate_runtime_databases(resolved)
+    _, errors = verify_runtime_databases(resolved)
+    if not all(status.values()) or errors:
+        details = []
+        for db_name in sorted(SCHEMAS):
+            db_errors = errors.get(db_name, [])
+            if not db_errors and not status.get(db_name, False):
+                db_errors = ["verification returned false"]
+            details.extend(f"{db_name}: {error}" for error in db_errors)
+        raise RuntimeError("runtime database schema verification failed: " + "; ".join(details))
     return status
 
 
@@ -1919,7 +2007,7 @@ def bootstrap_runtime(
 ) -> RuntimeBootstrapResult:
     """Prepare runtime state, migrate databases, and register integration skills."""
     resolved = prepare_runtime_directories(config or IntegrationConfig())
-    db_status = migrate_runtime_databases(resolved)
+    db_status = require_runtime_databases(resolved)
     ctx = session_context or make_session_context(resolved, model_name=model_name, jwt_claims=jwt_claims)
     orchestrator = BootstrapOrchestrator(resolved, tool_registry, ctx)
     ok = orchestrator.run()
@@ -1955,6 +2043,9 @@ def doctor_runtime(
         "proxy_allowlist": _runtime_proxy_allowlist_path(resolved).is_file(),
         "gateway_manifest": _runtime_gateway_manifest_path(resolved).is_file(),
         "workspace_manifest": _runtime_workspace_manifest_path(resolved).is_file(),
+        "mission_control_dashboard_plugin": (
+            _runtime_dashboard_plugin_dir(resolved) / "dashboard" / "manifest.json"
+        ).is_file(),
         "operator_validation_checklist": _runtime_operator_validation_checklist_path(resolved).is_file(),
         "evidence_factory_manifest": _runtime_evidence_factory_manifest_path(resolved).is_file(),
         "replay_readiness_report": _runtime_replay_readiness_report_path(resolved).is_file(),
@@ -1983,13 +2074,10 @@ def doctor_runtime(
         _runtime_profile_validation_repo_root(resolved),
     )
 
-    database_status = {db_name: False for db_name in CANONICAL_DATABASES}
+    database_status = {db_name: False for db_name in SCHEMAS}
+    database_errors: dict[str, list[str]] = {}
     if path_status["data_dir"]:
-        db_manager = DatabaseManager(resolved.data_dir)
-        try:
-            database_status.update(db_manager.verify_all_databases())
-        finally:
-            db_manager.close_all()
+        database_status, database_errors = verify_runtime_databases(resolved)
 
     registered_tools: list[str] = []
     if tool_registry is not None:
@@ -1999,7 +2087,11 @@ def doctor_runtime(
 
     missing_items = [name for name, ok in path_status.items() if not ok]
     missing_items.extend(f"profile:{issue}" for issue in profile_validation.issues)
-    missing_items.extend(f"db:{db_name}" for db_name, ok in database_status.items() if not ok)
+    missing_items.extend(
+        f"db:{db_name}:{'; '.join(database_errors.get(db_name, ['verification failed']))}"
+        for db_name, ok in database_status.items()
+        if not ok
+    )
     if tool_registry is not None:
         missing_items.extend(f"tool:{tool_name}" for tool_name in EXPECTED_CORE_TOOLS if tool_name not in registered_tools)
 
@@ -2008,6 +2100,7 @@ def doctor_runtime(
         config=resolved,
         path_status=path_status,
         database_status=database_status,
+        database_errors=database_errors,
         registered_tools=registered_tools,
         missing_items=missing_items,
         profile_manifest_path=str(_runtime_profile_manifest_path(resolved)),
@@ -2733,7 +2826,7 @@ def run_proxy_self_test(config: IntegrationConfig | None = None) -> ProxySelfTes
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     install_runtime_profile(resolved)
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     audit_log_path = _runtime_proxy_audit_log_path(resolved)
     if audit_log_path.exists():
         audit_log_path.unlink()
@@ -2869,7 +2962,7 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
 
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     install_runtime_profile(resolved)
     db = DatabaseManager(resolved.data_dir)
     operator = OperatorInterfaceSkill(db)
@@ -3613,7 +3706,7 @@ def replay_readiness_report(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     install_runtime_profile(resolved, repo_root=str(root))
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
     report = manager.replay_readiness_report(limit=limit)
@@ -3639,7 +3732,7 @@ def export_replay_corpus(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     install_runtime_profile(resolved, repo_root=str(root))
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
     export = manager.export_replay_corpus(limit=limit, skill_name=skill_name, activation_only=True)
@@ -3663,7 +3756,7 @@ def optimizer_snapshot(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     install = install_runtime_profile(resolved, repo_root=str(root))
     runtime = MockHermesRuntime(data_dir=resolved.data_dir)
     doctor = doctor_runtime(runtime, config=resolved, bootstrap_if_needed=False)
@@ -3748,7 +3841,7 @@ def analyze_harness_candidates(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     prepare_runtime_directories(resolved)
-    migrate_runtime_databases(resolved)
+    require_runtime_databases(resolved)
     install_runtime_profile(resolved, repo_root=str(root))
     manager = HarnessVariantManager(str(Path(resolved.data_dir) / "telemetry.db"))
     analysis = manager.analyze_harness_candidates(skill_name=skill_name, limit=limit)
@@ -3828,6 +3921,7 @@ def _readiness_actions(
     failed_config_checks: Sequence[str],
     doctor_ok: bool,
     contract_ok: bool,
+    council_isolation_ok: bool,
     cli_smoke_attempted: bool,
     cli_smoke_ok: bool,
     replay_report: dict[str, Any],
@@ -3842,10 +3936,12 @@ def _readiness_actions(
     )
     if not doctor_ok or not contract_ok:
         actions.append(f"Rehearse the repo-local launch stack and fix doctor/contract drift: `{bootstrap_command}`")
+    if not council_isolation_ok:
+        actions.append("Run and fix the Hermes delegate isolation canary before treating Council Tier 1 as live-operational.")
     if replay_report.get("status") != "READY_FOR_BROADER_REPLAY":
         actions.append(f"Grow the replay corpus before live promotion: `{bounded_evidence_command}`")
     if not hermes_installed:
-        actions.append(f"Install Hermes Agent v0.10.0+ and rerun live readiness: `{readiness_command}`")
+        actions.append(f"Install Hermes Agent v0.11.0+ and rerun live readiness: `{readiness_command}`")
     elif not profile_listed or missing_seed_tools or failed_config_checks:
         actions.append("Repair the Hermes profile/tool/config surface, then rerun the readiness check.")
     if cli_smoke_attempted and not cli_smoke_ok:
@@ -4076,7 +4172,7 @@ def assess_hermes_readiness(
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     install = install_runtime_profile(resolved, repo_root=repo_root)
     repo_root_path = Path(install.repo_root)
-    database_status = migrate_runtime_databases(resolved)
+    database_status = require_runtime_databases(resolved)
     registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
     contract = HermesProfileContract(config=resolved, repo_root=str(repo_root_path))
     contract_harness = exercise_hermes_contract(
@@ -4084,6 +4180,7 @@ def assess_hermes_readiness(
         repo_root=str(repo_root_path),
         tool_registry=registry,
     )
+    council_isolation_canary = run_subagent_isolation_canary(registry)
     doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
     checkpoint_backup_path = _snapshot_runtime_data(resolved)
     profile_validation = _validate_profile_artifacts(resolved, repo_root_path)
@@ -4135,6 +4232,11 @@ def assess_hermes_readiness(
         blocking_items.append(
             "repo-local Hermes contract harness failed: "
             f"{', '.join(contract_harness.issues)}"
+        )
+    if not council_isolation_canary.get("ok"):
+        blocking_items.append(
+            "Council delegate isolation canary failed: "
+            f"{', '.join(council_isolation_canary.get('details', [])) or 'unknown isolation failure'}"
         )
 
     runner = command_runner or _run_external_command
@@ -4286,6 +4388,7 @@ def assess_hermes_readiness(
         failed_config_checks=failed_config_checks,
         doctor_ok=doctor.ok,
         contract_ok=contract_harness.ok,
+        council_isolation_ok=bool(council_isolation_canary.get("ok")),
         cli_smoke_attempted=cli_smoke_attempted,
         cli_smoke_ok=cli_smoke_ok,
         replay_report=replay_report,
@@ -4318,6 +4421,7 @@ def assess_hermes_readiness(
         doctor=doctor,
         contract_harness=contract_harness,
         replay_report=replay_report,
+        council_isolation_canary=council_isolation_canary,
         recommended_actions=recommended_actions,
     )
 
@@ -4997,7 +5101,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
+    parser.add_argument("--mission-control", action="store_true", help="Run the local Mission Control operator web UI")
+    parser.add_argument("--mission-control-demo", action="store_true", help="Seed a lightweight demo dataset before starting Mission Control")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
+    parser.add_argument("--mission-control-host", default="127.0.0.1", help="Bind host for --mission-control")
+    parser.add_argument("--mission-control-port", type=int, default=8765, help="Bind port for --mission-control")
     parser.add_argument("--data-dir", default="~/.hermes/data/")
     parser.add_argument("--skills-dir", default="~/.hermes/skills/hybrid-autonomous-ai/")
     parser.add_argument("--checkpoints-dir", default="~/.hermes/skills/hybrid-autonomous-ai/checkpoints/")
@@ -5053,6 +5161,7 @@ def _main_impl(
         print(f"profile_dir={result.profile_dir}")
         print(f"profile_config={result.profile_config_path}")
         print(f"spec_profile={result.spec_profile_path}")
+        print(f"dashboard_plugin={result.dashboard_plugin_path}")
         print(f"launchers={','.join(sorted(result.launcher_paths.values()))}")
         print(f"linked_skills={len(result.linked_skill_paths)}")
         return 0
@@ -5060,6 +5169,23 @@ def _main_impl(
     if args.operator_checklist:
         result = install_runtime_profile(config, repo_root=args.repo_root)
         print(f"operator_validation_checklist={_runtime_operator_validation_checklist_path(result.config)}")
+        return 0
+
+    if args.mission_control:
+        from skills.mission_control import run_mission_control_server, seed_demo_state
+
+        resolved = _normalize_runtime_layout(config).resolve_paths()
+        prepare_runtime_directories(resolved)
+        require_runtime_databases(resolved)
+        install_runtime_profile(resolved, repo_root=args.repo_root)
+        if args.mission_control_demo:
+            seed_result = seed_demo_state(resolved.data_dir)
+            print(f"mission_control_demo={json.dumps(seed_result, sort_keys=True)}")
+        run_mission_control_server(
+            resolved.data_dir,
+            host=args.mission_control_host,
+            port=args.mission_control_port,
+        )
         return 0
 
     if args.doctor:
@@ -5095,6 +5221,7 @@ def _main_impl(
         print(f"doctor_missing={','.join(result.doctor.missing_items) if result.doctor.missing_items else 'none'}")
         print(f"contract_harness={'ok' if result.contract_harness.ok else 'failed'}")
         print(f"contract_trace_id={result.contract_harness.trace_id or 'none'}")
+        print(f"council_isolation={'ok' if result.council_isolation_canary.get('ok') else 'failed'}")
         print(
             "replay="
             f"{result.replay_report['eligible_source_traces']}/"

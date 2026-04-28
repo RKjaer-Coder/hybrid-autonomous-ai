@@ -28,6 +28,7 @@ from skills.runtime import (
     optimizer_snapshot,
     prepare_runtime_directories,
     replay_readiness_report,
+    require_runtime_databases,
     run_research_cron_proof,
     run_evidence_factory,
     run_proxy_self_test,
@@ -60,6 +61,38 @@ def test_migrate_runtime_databases_builds_all_sqlite_files(tmp_path):
     assert (tmp_path / "data" / "telemetry.db").exists()
     assert (tmp_path / "data" / "financial_ledger.db").exists()
     assert (tmp_path / "data" / "operator_digest.db").exists()
+
+
+def test_require_runtime_databases_fails_closed_on_schema_drift(tmp_path):
+    cfg = IntegrationConfig(data_dir=str(tmp_path / "data"))
+    migrate_runtime_databases(cfg)
+    operator_db = tmp_path / "data" / "operator_digest.db"
+    with sqlite3.connect(operator_db) as conn:
+        conn.execute("ALTER TABLE digest_history RENAME TO digest_history__new")
+        conn.execute(
+            """
+            CREATE TABLE digest_history (
+              digest_id TEXT PRIMARY KEY,
+              digest_type TEXT NOT NULL CHECK (digest_type IN ('daily', 'catch_up')),
+              content TEXT NOT NULL,
+              sections_included TEXT NOT NULL CHECK (json_valid(sections_included)),
+              word_count INTEGER NOT NULL,
+              operator_state TEXT NOT NULL CHECK (operator_state IN ('ACTIVE', 'CONSERVATIVE', 'ABSENT')),
+              delivered_at TEXT,
+              acknowledged_at TEXT,
+              created_at TEXT NOT NULL
+            ) STRICT
+            """
+        )
+        conn.execute("DROP TABLE digest_history__new")
+        conn.commit()
+
+    try:
+        require_runtime_databases(cfg)
+    except RuntimeError as exc:
+        assert "operator_digest" in str(exc)
+    else:
+        raise AssertionError("expected schema drift to fail closed")
 
 
 def test_runtime_control_manager_does_not_create_telemetry_db_when_missing(tmp_path):
@@ -180,6 +213,14 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["optimizer_snapshot_path"]).is_file()
     assert Path(manifest["harness_candidate_report_path"]).is_file()
     assert Path(manifest["mac_studio_day_one_handoff_path"]).is_file()
+    assert Path(result.dashboard_plugin_path, "dashboard", "manifest.json").is_file()
+    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["path"] == result.dashboard_plugin_path
+    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["route"] == "/mission-control"
+    assert manifest["dashboard_plugins"]["hybrid-mission-control"]["gate_actions_enabled"] is False
+    plugin_config = json.loads((Path(result.dashboard_plugin_path) / "runtime_config.json").read_text(encoding="utf-8"))
+    assert plugin_config["repo_root"] == str(repo_root.resolve())
+    assert plugin_config["data_dir"] == cfg.data_dir
+    assert plugin_config["interaction_channel"] == "hermes_dashboard"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
@@ -220,6 +261,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "propose_best_harness_candidate" in manifest["commands"]
     assert "mac_studio_day_one" in manifest["commands"]
     assert "milestone_status" in manifest["commands"]
+    assert "mission_control" in manifest["commands"]
     assert sorted(Path(path).name for path in result.linked_skill_paths) == ["immune_system", "strategic_memory"]
     for launcher_path in result.launcher_paths.values():
         launcher = Path(launcher_path)
@@ -380,7 +422,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "default\nhybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -418,7 +460,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
 
     assert result.ok is True
     assert result.hermes_installed is True
-    assert result.hermes_version == "0.10.0"
+    assert result.hermes_version == "0.11.0"
     assert result.profile_listed is True
     assert all(result.seed_tool_status.values())
     assert all(result.config_status.values())
@@ -427,6 +469,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     assert Path(result.checkpoint_backup_path).is_file()
     assert result.doctor.ok is True
     assert result.contract_harness.ok is True
+    assert result.council_isolation_canary["ok"] is True
     assert result.replay_report["growth_plan"]["next_actions"]
     assert result.recommended_actions
     assert not result.blocking_items
@@ -506,7 +549,7 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -561,7 +604,7 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.10.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.11.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):

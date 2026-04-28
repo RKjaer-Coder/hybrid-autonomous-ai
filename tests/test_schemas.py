@@ -497,5 +497,54 @@ class SchemaMetaCompatibilityTests(unittest.TestCase):
             migrate._upsert_schema_meta(FakeConn(), "x.sql", "abc123")  # type: ignore[arg-type]
 
 
+class SchemaMigrationDriftTests(unittest.TestCase):
+    def test_operator_heartbeat_constraint_rebuild_preserves_rows_and_allows_dashboard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "operator_digest.db"
+            old_schema = (ROOT / "schemas/operator_digest.sql").read_text(encoding="utf-8").replace(
+                "'CLI', 'mission_control', 'hermes_dashboard', 'telegram', 'discord', 'slack'",
+                "'CLI', 'mission_control', 'telegram', 'discord', 'slack'",
+            )
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(old_schema)
+                conn.execute(
+                    "INSERT INTO operator_heartbeat VALUES (?,?,?,?)",
+                    ("old-heartbeat", "command", "mission_control", ts()),
+                )
+                conn.commit()
+
+            migrate.apply_schema(db_path, ROOT / "schemas/operator_digest.sql")
+            ok, errors = migrate.verify_database(db_path, "operator_digest", ROOT / "schemas/operator_digest.sql")
+            self.assertTrue(ok, errors)
+
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO operator_heartbeat VALUES (?,?,?,?)",
+                    ("dashboard-heartbeat", "command", "hermes_dashboard", ts()),
+                )
+                count = conn.execute("SELECT COUNT(*) FROM operator_heartbeat").fetchone()[0]
+                meta = conn.execute(
+                    "SELECT schema_hash FROM _schema_meta WHERE schema_name='operator_digest.sql'"
+                ).fetchone()
+            self.assertEqual(count, 2)
+            self.assertIsNotNone(meta)
+
+    def test_verify_database_detects_unmigrated_check_constraint_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "operator_digest.db"
+            old_schema = (ROOT / "schemas/operator_digest.sql").read_text(encoding="utf-8").replace(
+                "'CLI', 'mission_control', 'hermes_dashboard', 'telegram', 'discord', 'slack'",
+                "'CLI', 'mission_control', 'telegram', 'discord', 'slack'",
+            )
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(old_schema)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.commit()
+
+            ok, errors = migrate.verify_database(db_path, "operator_digest", ROOT / "schemas/operator_digest.sql")
+            self.assertFalse(ok)
+            self.assertTrue(any("table drift detected for operator_heartbeat" in error for error in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

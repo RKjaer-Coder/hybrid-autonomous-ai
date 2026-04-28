@@ -69,7 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_gate_log_project_id ON gate_log(project_id);
 CREATE TABLE IF NOT EXISTS operator_heartbeat (
   entry_id TEXT PRIMARY KEY,
   interaction_type TEXT NOT NULL CHECK (interaction_type IN ('message', 'gate_response', 'digest_ack', 'command')),
-  channel TEXT NOT NULL CHECK (channel IN ('CLI', 'mission_control', 'telegram', 'discord', 'slack')),
+  channel TEXT NOT NULL CHECK (channel IN ('CLI', 'mission_control', 'hermes_dashboard', 'telegram', 'discord', 'slack')),
   timestamp TEXT NOT NULL
 ) STRICT;
 
@@ -88,6 +88,33 @@ CREATE TABLE IF NOT EXISTS operator_load_tracking (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_operator_load_tracking_week_start ON operator_load_tracking(week_start);
+
+CREATE TABLE IF NOT EXISTS operator_project_preferences (
+  project_id TEXT PRIMARY KEY,
+  priority TEXT NOT NULL CHECK (priority IN ('P0_IMMEDIATE','P1_HIGH','P2_NORMAL','P3_BACKGROUND')),
+  focus_note TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_operator_project_preferences_priority_updated
+  ON operator_project_preferences(priority, updated_at);
+
+CREATE TABLE IF NOT EXISTS operator_manual_tasks (
+  task_id TEXT PRIMARY KEY,
+  project_id TEXT,
+  title TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('TODO','IN_PROGRESS','BLOCKED','DONE')),
+  priority TEXT NOT NULL CHECK (priority IN ('P0_IMMEDIATE','P1_HIGH','P2_NORMAL','P3_BACKGROUND')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_operator_manual_tasks_status_priority
+  ON operator_manual_tasks(status, priority);
+CREATE INDEX IF NOT EXISTS idx_operator_manual_tasks_project_status
+  ON operator_manual_tasks(project_id, status);
 
 CREATE TABLE IF NOT EXISTS runtime_control_state (
   state_id TEXT PRIMARY KEY CHECK (state_id = 'runtime'),
