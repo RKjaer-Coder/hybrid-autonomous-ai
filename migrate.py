@@ -35,6 +35,17 @@ EXPECTED_OBJECTS = {
             "quality_gate_events",
             "evidence_bundles",
             "commercial_decision_packets",
+            "projects",
+            "project_tasks",
+            "project_task_assignments",
+            "project_outcomes",
+            "project_artifact_receipts",
+            "project_customer_feedback",
+            "project_revenue_attributions",
+            "project_operator_load",
+            "project_status_rollups",
+            "project_close_decision_packets",
+            "project_replay_projection_comparisons",
             "model_task_classes",
             "model_candidates",
             "model_holdout_policies",
@@ -68,6 +79,25 @@ EXPECTED_OBJECTS = {
             "idx_evidence_bundles_quality",
             "idx_commercial_decision_packets_target",
             "idx_commercial_decision_packets_bundle",
+            "idx_projects_status",
+            "idx_projects_packet",
+            "idx_project_tasks_project_status",
+            "idx_project_tasks_type_status",
+            "idx_project_task_assignments_task",
+            "idx_project_task_assignments_worker",
+            "idx_project_outcomes_project",
+            "idx_project_outcomes_task",
+            "idx_project_artifact_receipts_project",
+            "idx_project_artifact_receipts_task",
+            "idx_project_customer_feedback_project",
+            "idx_project_customer_feedback_artifact",
+            "idx_project_revenue_attributions_project",
+            "idx_project_revenue_attributions_status",
+            "idx_project_operator_load_project",
+            "idx_project_operator_load_type",
+            "idx_project_status_rollups_project",
+            "idx_project_close_decision_packets_project",
+            "idx_project_replay_projection_comparisons_project",
             "idx_model_task_classes_status",
             "idx_model_candidates_state",
             "idx_model_holdout_policies_task",
@@ -211,6 +241,7 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
 def _preflight_schema_compat(conn: sqlite3.Connection, schema_name: str) -> None:
     if schema_name == "kernel.sql":
         _rebuild_kernel_events_for_research_entities(conn)
+        _rebuild_kernel_projection_outbox_if_drifted(conn)
         return
     if schema_name == "strategic_memory.sql":
         _ensure_column(
@@ -376,6 +407,63 @@ def _rebuild_kernel_events_for_research_entities(conn: sqlite3.Connection) -> No
             """
         )
         conn.execute("DROP TABLE events__old")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def _rebuild_kernel_projection_outbox_if_drifted(conn: sqlite3.Connection) -> None:
+    """Normalize old projection_outbox table shapes before semantic verification."""
+    existing_sql = _object_sql(conn, "table", "projection_outbox")
+    if not existing_sql:
+        return
+    with sqlite3.connect(":memory:") as expected:
+        expected.execute(
+            """
+            CREATE TABLE projection_outbox (
+              outbox_id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL REFERENCES events(event_id),
+              projection_name TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending','complete','failed','halted')),
+              created_at TEXT NOT NULL,
+              completed_at TEXT,
+              error TEXT
+            ) STRICT
+            """
+        )
+        expected_sig = _table_signature(expected, "projection_outbox")
+    if _table_signature(conn, "projection_outbox") == expected_sig:
+        return
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("ALTER TABLE projection_outbox RENAME TO projection_outbox__old")
+        conn.execute(
+            """
+            CREATE TABLE projection_outbox (
+              outbox_id TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL REFERENCES events(event_id),
+              projection_name TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN ('pending','complete','failed','halted')),
+              created_at TEXT NOT NULL,
+              completed_at TEXT,
+              error TEXT
+            ) STRICT
+            """
+        )
+        old_cols = _table_columns(conn, "projection_outbox__old")
+        if {"outbox_id", "event_id", "status", "created_at"}.issubset(old_cols):
+            projection_expr = "projection_name" if "projection_name" in old_cols else "'legacy_projection'"
+            completed_expr = "completed_at" if "completed_at" in old_cols else "NULL"
+            error_expr = "error" if "error" in old_cols else "NULL"
+            conn.execute(
+                f"""
+                INSERT INTO projection_outbox(
+                  outbox_id, event_id, projection_name, status, created_at, completed_at, error
+                )
+                SELECT outbox_id, event_id, {projection_expr}, status, created_at, {completed_expr}, {error_expr}
+                FROM projection_outbox__old
+                """
+            )
+        conn.execute("DROP TABLE projection_outbox__old")
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
 

@@ -6,17 +6,27 @@ from decimal import Decimal
 from pathlib import Path
 
 from kernel import (
+    CapabilityGrant,
     ClaimRecord,
     EvidenceBundle,
     KernelCommercialResearchWorkflow,
     KernelResearchEngine,
     KernelStore,
+    ProjectArtifactReceipt,
+    ProjectCustomerFeedback,
+    ProjectOperatorLoadRecord,
+    ProjectOutcome,
+    ProjectRevenueAttribution,
+    ProjectTaskAssignment,
     ResearchRequest,
+    SideEffectIntent,
+    SideEffectReceipt,
     SourceAcquisitionCheck,
     SourcePlan,
     SourceRecord,
 )
-from kernel.records import new_id, sha256_text
+from kernel.records import new_id, payload_hash, sha256_text
+from kernel.store import KERNEL_POLICY_VERSION
 from kernel.research import (
     evidence_bundle_command,
     research_request_command,
@@ -24,7 +34,19 @@ from kernel.research import (
     source_acquisition_command,
     source_plan_command,
 )
-from kernel.commercial import commercial_decision_packet_command
+from kernel.commercial import (
+    commercial_decision_packet_command,
+    g1_project_approval_command,
+    project_artifact_receipt_command,
+    project_close_decision_command,
+    project_feedback_command,
+    project_operator_load_command,
+    project_outcome_command,
+    project_replay_comparison_command,
+    project_revenue_attribution_command,
+    project_status_rollup_command,
+    project_task_command,
+)
 from migrate import apply_schema
 from skills.db_manager import DatabaseManager
 
@@ -376,6 +398,332 @@ class KernelResearchTests(unittest.TestCase):
         self.assertEqual(packet.recommendation, "insufficient_evidence")
         self.assertIn("quality_gate_degraded", packet.risk_flags)
         self.assertIn("unsupported_claims", packet.risk_flags)
+
+    def test_g1_approval_creates_replayable_project_task_and_outcome_loop(self):
+        request = self.request()
+        self.engine.create_request(request_command("research-create-project-loop"), request)
+        plan = self.plan(request.request_id)
+        self.engine.create_source_plan(source_plan_command(request_id=request.request_id, key="source-plan-project-loop"), plan)
+        self.engine.start_collection(request_command("research-collect-project-loop"), request.request_id)
+        self.engine.start_synthesis(request_command("research-synthesize-project-loop"), request.request_id)
+        bundle = self.bundle_for_plan(request.request_id, plan.source_plan_id)
+        self.engine.commit_evidence_bundle(
+            evidence_bundle_command(request_id=request.request_id, key="evidence-project-loop"),
+            bundle,
+        )
+        packet = self.commercial.create_decision_packet(
+            commercial_decision_packet_command(evidence_bundle_id=bundle.bundle_id, key="commercial-project-loop"),
+            bundle.bundle_id,
+            project_name="Local Agent Ops Package",
+        )
+
+        kickoff = self.commercial.approve_g1_validation_project(
+            g1_project_approval_command(packet_id=packet.packet_id, key="g1-project-loop"),
+            packet.packet_id,
+            notes="approve bounded zero-spend validation",
+        )
+        with self.assertRaises(PermissionError):
+            self.store.transition_project_task(
+                project_task_command(project_id=kickoff["project_id"], key="project-loop-task-running-without-assignment"),
+                kickoff["task_id"],
+                "running",
+                "running requires an accepted worker assignment",
+            )
+        grant = CapabilityGrant(
+            task_id=kickoff["task_id"],
+            subject_type="agent",
+            subject_id="validation-worker-1",
+            capability_type="file",
+            actions=["read", "write"],
+            resource={"kind": "project_workspace"},
+            scope={"project_id": kickoff["project_id"]},
+            conditions={"external_side_effects": "blocked"},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=2,
+        )
+        grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-assignment-grant"),
+            grant,
+        )
+        assignment = ProjectTaskAssignment(
+            task_id=kickoff["task_id"],
+            project_id=kickoff["project_id"],
+            worker_type="agent",
+            worker_id="validation-worker-1",
+            grant_ids=[grant_id],
+            accepted_capabilities=[
+                {"capability_type": "file", "actions": ["read", "write"], "scope": "project_workspace"}
+            ],
+            notes="bounded validation worker accepted the task",
+        )
+        assignment_id = self.store.assign_project_task(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-task-assignment"),
+            assignment,
+        )
+
+        outcome = ProjectOutcome(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            phase_name="Validate",
+            outcome_type="feedback",
+            summary="Operator reviewed the validation artifact and accepted the first bounded loop.",
+            artifact_refs=["artifact://local/project-loop/validation-note"],
+            metrics={"validation_result": "accepted", "buyer_conversations": 1},
+            feedback={"operator_rating": 0.8, "next_recommendation": "build_small_artifact"},
+            revenue_impact={"amount": 0, "currency": "USD", "period": "one_time"},
+            operator_load_actual="15 minutes",
+            status="accepted",
+        )
+        outcome_id = self.commercial.record_project_outcome(
+            project_outcome_command(project_id=kickoff["project_id"], key="project-loop-outcome"),
+            outcome,
+        )
+        validation_artifact = ProjectArtifactReceipt(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            artifact_ref="artifact://local/project-loop/validation-note",
+            artifact_kind="validation_artifact",
+            summary="Validation note was recorded as a governed project artifact.",
+            data_class="internal",
+            delivery_channel="local_workspace",
+            status="accepted",
+        )
+        validation_artifact_id = self.commercial.record_project_artifact_receipt(
+            project_artifact_receipt_command(project_id=kickoff["project_id"], key="project-loop-validation-artifact"),
+            validation_artifact,
+        )
+
+        side_effect_grant = CapabilityGrant(
+            task_id=kickoff["task_id"],
+            subject_type="adapter",
+            subject_id="side_effect_broker",
+            capability_type="side_effect",
+            actions=["prepare"],
+            resource={"kind": "publish", "artifact_ref": "artifact://local/project-loop/shipped-demo"},
+            scope={"project_id": kickoff["project_id"]},
+            conditions={"operator_approved": True},
+            expires_at="2999-01-01T00:00:00Z",
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        side_effect_grant_id = self.store.issue_capability_grant(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-side-effect-grant"),
+            side_effect_grant,
+        )
+        side_effect_intent = SideEffectIntent(
+            task_id=kickoff["task_id"],
+            side_effect_type="publish",
+            target={"channel": "operator_review_link"},
+            payload_hash=payload_hash({"artifact_ref": "artifact://local/project-loop/shipped-demo"}),
+            required_authority="operator_gate",
+            grant_id=side_effect_grant_id,
+            timeout_policy="ask_operator",
+        )
+        side_effect_intent_id = self.store.prepare_side_effect(
+            project_task_command(
+                project_id=kickoff["project_id"],
+                key="project-loop-side-effect-intent",
+                requested_by="operator",
+                requested_authority="operator_gate",
+            ),
+            side_effect_intent,
+        )
+        side_effect_receipt = SideEffectReceipt(
+            intent_id=side_effect_intent_id,
+            receipt_type="success",
+            receipt_hash=payload_hash({"published": True}),
+            details={"artifact_ref": "artifact://local/project-loop/shipped-demo", "visible_to": "operator"},
+        )
+        side_effect_receipt_id = self.store.record_side_effect_receipt(
+            project_task_command(project_id=kickoff["project_id"], key="project-loop-side-effect-receipt"),
+            side_effect_receipt,
+        )
+        shipped_artifact = ProjectArtifactReceipt(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            artifact_ref="artifact://local/project-loop/shipped-demo",
+            artifact_kind="shipped_artifact",
+            summary="The validation demo was shipped to the operator review channel.",
+            data_class="internal",
+            delivery_channel="operator_review_link",
+            side_effect_intent_id=side_effect_intent_id,
+            side_effect_receipt_id=side_effect_receipt_id,
+            customer_visible=True,
+            status="accepted",
+        )
+        shipped_artifact_id = self.commercial.record_project_artifact_receipt(
+            project_artifact_receipt_command(project_id=kickoff["project_id"], key="project-loop-shipped-artifact"),
+            shipped_artifact,
+        )
+        feedback = ProjectCustomerFeedback(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            artifact_receipt_id=shipped_artifact_id,
+            source_type="customer",
+            customer_ref="operator-as-first-customer",
+            summary="The first reviewer accepted the shipped artifact and asked for one scoped build follow-up.",
+            sentiment="positive",
+            evidence_refs=[f"kernel:project_artifact_receipts/{shipped_artifact_id}"],
+            action_required=True,
+            status="needs_followup",
+        )
+        feedback_id = self.commercial.record_project_customer_feedback(
+            project_feedback_command(project_id=kickoff["project_id"], key="project-loop-feedback"),
+            feedback,
+        )
+        revenue = ProjectRevenueAttribution(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            outcome_id=outcome_id,
+            amount_usd=Decimal("0"),
+            source="operator_reported",
+            attribution_period="2026-05",
+            confidence=0.35,
+            status="needs_reconciliation",
+        )
+        revenue_id = self.commercial.record_project_revenue_attribution(
+            project_revenue_attribution_command(project_id=kickoff["project_id"], key="project-loop-revenue"),
+            revenue,
+        )
+        operator_load = ProjectOperatorLoadRecord(
+            project_id=kickoff["project_id"],
+            task_id=kickoff["task_id"],
+            outcome_id=outcome_id,
+            minutes=15,
+            load_type="gate_review",
+            source="operator_reported",
+            notes="G1 approval and validation artifact review",
+        )
+        load_id = self.commercial.record_project_operator_load(
+            project_operator_load_command(project_id=kickoff["project_id"], key="project-loop-operator-load"),
+            operator_load,
+        )
+        rollup = self.commercial.derive_project_status_rollup(
+            project_status_rollup_command(project_id=kickoff["project_id"], key="project-loop-rollup"),
+            kickoff["project_id"],
+        )
+        close_packet = self.commercial.create_project_close_decision(
+            project_close_decision_command(project_id=kickoff["project_id"], key="project-loop-close-decision"),
+            kickoff["project_id"],
+            rollup_id=rollup.rollup_id,
+        )
+        comparison = self.commercial.compare_project_replay_to_projection(
+            project_replay_comparison_command(project_id=kickoff["project_id"], key="project-loop-replay-compare"),
+            kickoff["project_id"],
+        )
+
+        with self.store.connect() as conn:
+            decision_row = conn.execute(
+                "SELECT status, verdict FROM decisions WHERE decision_id=?",
+                (packet.decision_id,),
+            ).fetchone()
+            project_row = conn.execute(
+                "SELECT status, decision_packet_id FROM projects WHERE project_id=?",
+                (kickoff["project_id"],),
+            ).fetchone()
+            task_row = conn.execute(
+                "SELECT status, task_type, authority_required FROM project_tasks WHERE task_id=?",
+                (kickoff["task_id"],),
+            ).fetchone()
+            assignment_row = conn.execute(
+                "SELECT status, worker_type, worker_id FROM project_task_assignments WHERE assignment_id=?",
+                (assignment_id,),
+            ).fetchone()
+            outcome_row = conn.execute(
+                "SELECT status, outcome_type FROM project_outcomes WHERE outcome_id=?",
+                (outcome_id,),
+            ).fetchone()
+            shipped_row = conn.execute(
+                "SELECT artifact_kind, customer_visible, side_effect_receipt_id FROM project_artifact_receipts WHERE receipt_id=?",
+                (shipped_artifact_id,),
+            ).fetchone()
+            feedback_row = conn.execute(
+                "SELECT source_type, sentiment, status FROM project_customer_feedback WHERE feedback_id=?",
+                (feedback_id,),
+            ).fetchone()
+            revenue_row = conn.execute(
+                "SELECT amount_usd, status, reconciliation_task_id FROM project_revenue_attributions WHERE attribution_id=?",
+                (revenue_id,),
+            ).fetchone()
+            load_row = conn.execute(
+                "SELECT minutes, load_type FROM project_operator_load WHERE load_id=?",
+                (load_id,),
+            ).fetchone()
+            rollup_row = conn.execute(
+                """
+                SELECT recommended_status, close_recommendation, revenue_attributed_usd,
+                       operator_load_minutes
+                FROM project_status_rollups
+                WHERE rollup_id=?
+                """,
+                (rollup.rollup_id,),
+            ).fetchone()
+            close_decision_row = conn.execute(
+                """
+                SELECT recommendation, required_authority, status
+                FROM project_close_decision_packets
+                WHERE packet_id=?
+                """,
+                (close_packet.packet_id,),
+            ).fetchone()
+            comparison_row = conn.execute(
+                """
+                SELECT matches, mismatches_json
+                FROM project_replay_projection_comparisons
+                WHERE comparison_id=?
+                """,
+                (comparison.comparison_id,),
+            ).fetchone()
+
+        self.assertEqual(decision_row["status"], "decided")
+        self.assertEqual(decision_row["verdict"], "approve_validation")
+        self.assertEqual(project_row["status"], "active")
+        self.assertEqual(project_row["decision_packet_id"], packet.packet_id)
+        self.assertEqual(task_row["task_type"], "validate")
+        self.assertEqual(task_row["authority_required"], "single_agent")
+        self.assertEqual(task_row["status"], "completed")
+        self.assertEqual(assignment_row["status"], "accepted")
+        self.assertEqual(assignment_row["worker_type"], "agent")
+        self.assertEqual(assignment_row["worker_id"], "validation-worker-1")
+        self.assertEqual(outcome_row["status"], "accepted")
+        self.assertEqual(outcome_row["outcome_type"], "feedback")
+        self.assertEqual(shipped_row["artifact_kind"], "shipped_artifact")
+        self.assertEqual(shipped_row["customer_visible"], 1)
+        self.assertEqual(shipped_row["side_effect_receipt_id"], side_effect_receipt_id)
+        self.assertEqual(feedback_row["source_type"], "customer")
+        self.assertEqual(feedback_row["sentiment"], "positive")
+        self.assertEqual(feedback_row["status"], "needs_followup")
+        self.assertEqual(revenue_row["amount_usd"], "0")
+        self.assertEqual(revenue_row["status"], "needs_reconciliation")
+        self.assertTrue(revenue_row["reconciliation_task_id"])
+        self.assertEqual(load_row["minutes"], 15)
+        self.assertEqual(load_row["load_type"], "gate_review")
+        self.assertEqual(rollup_row["recommended_status"], "active")
+        self.assertEqual(rollup_row["close_recommendation"], "continue")
+        self.assertEqual(rollup_row["revenue_attributed_usd"], "0")
+        self.assertEqual(rollup_row["operator_load_minutes"], 15)
+        self.assertEqual(close_decision_row["recommendation"], "continue")
+        self.assertEqual(close_decision_row["required_authority"], "operator_gate")
+        self.assertEqual(close_decision_row["status"], "gated")
+        self.assertEqual(comparison_row["matches"], 1)
+        self.assertEqual(comparison_row["mismatches_json"], "[]")
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.decisions[packet.decision_id]["verdict"], "approve_validation")
+        self.assertEqual(replay.projects[kickoff["project_id"]]["status"], "active")
+        self.assertEqual(replay.project_task_assignments[assignment_id]["grant_ids"], [grant_id])
+        self.assertEqual(replay.project_tasks[kickoff["task_id"]]["status"], "completed")
+        self.assertEqual(replay.project_outcomes[outcome_id]["feedback"]["next_recommendation"], "build_small_artifact")
+        self.assertEqual(replay.project_artifact_receipts[validation_artifact_id]["status"], "accepted")
+        self.assertEqual(replay.project_artifact_receipts[shipped_artifact_id]["side_effect_receipt_id"], side_effect_receipt_id)
+        self.assertEqual(replay.project_customer_feedback[feedback_id]["action_required"], True)
+        self.assertEqual(replay.project_revenue_attributions[revenue_id]["status"], "needs_reconciliation")
+        self.assertIn(revenue_row["reconciliation_task_id"], replay.project_tasks)
+        self.assertEqual(replay.project_operator_load[load_id]["minutes"], 15)
+        self.assertEqual(replay.project_status_rollups[rollup.rollup_id]["close_recommendation"], "continue")
+        self.assertEqual(replay.project_close_decision_packets[close_packet.packet_id]["recommendation"], "continue")
+        self.assertTrue(replay.project_replay_projection_comparisons[comparison.comparison_id]["matches"])
 
     def test_bundle_rejects_unsupported_source_references(self):
         request = self.request()
