@@ -24,6 +24,18 @@ from .records import (
     ModelRouteDecision,
     ModelTaskClassRecord,
     OpportunityProjectDecisionPacket,
+    Project,
+    ProjectArtifactReceipt,
+    ProjectCloseDecisionPacket,
+    ProjectCustomerFeedback,
+    ProjectOperatorLoadRecord,
+    ProjectOutcome,
+    ProjectPhaseRollup,
+    ProjectReplayProjectionComparison,
+    ProjectRevenueAttribution,
+    ProjectStatusRollup,
+    ProjectTask,
+    ProjectTaskAssignment,
     ResearchRequest,
     SourceAcquisitionCheck,
     SourcePlan,
@@ -77,6 +89,17 @@ class ReplayState:
     quality_gate_events: dict[str, dict[str, Any]] = field(default_factory=dict)
     evidence_bundles: dict[str, dict[str, Any]] = field(default_factory=dict)
     commercial_decision_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    projects: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_task_assignments: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_outcomes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_artifact_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_customer_feedback: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_revenue_attributions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_operator_load: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_status_rollups: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_close_decision_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    project_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_task_classes: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
     local_offload_eval_sets: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -220,6 +243,27 @@ class KernelStore:
 
         return self.execute_command(command, handler)
 
+    def resolve_decision(
+        self,
+        command: Command,
+        decision_id: str,
+        *,
+        verdict: str,
+        decided_by: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.resolve_decision(
+                decision_id,
+                verdict=verdict,
+                decided_by=decided_by,
+                notes=notes,
+                confidence=confidence,
+            )
+
+        return self.execute_command(command, handler)
+
     def commit_evidence_bundle(self, command: Command, bundle: EvidenceBundle) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.commit_evidence_bundle(bundle)
@@ -233,6 +277,87 @@ class KernelStore:
     ) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.create_commercial_decision_packet(packet)
+
+        return self.execute_command(command, handler)
+
+    def create_project(self, command: Command, project: Project) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.create_project(project)
+
+        return self.execute_command(command, handler)
+
+    def create_project_task(self, command: Command, task: ProjectTask) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.create_project_task(task)
+
+        return self.execute_command(command, handler)
+
+    def assign_project_task(self, command: Command, assignment: ProjectTaskAssignment) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.assign_project_task(assignment)
+
+        return self.execute_command(command, handler)
+
+    def transition_project_task(self, command: Command, task_id: str, status: str, reason: str) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.transition_project_task(task_id, status, reason)
+
+        return self.execute_command(command, handler)
+
+    def record_project_outcome(self, command: Command, outcome: ProjectOutcome) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_project_outcome(outcome)
+
+        return self.execute_command(command, handler)
+
+    def record_project_artifact_receipt(self, command: Command, receipt: ProjectArtifactReceipt) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_project_artifact_receipt(receipt)
+
+        return self.execute_command(command, handler)
+
+    def record_project_customer_feedback(self, command: Command, feedback: ProjectCustomerFeedback) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_project_customer_feedback(feedback)
+
+        return self.execute_command(command, handler)
+
+    def record_project_revenue_attribution(self, command: Command, attribution: ProjectRevenueAttribution) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_project_revenue_attribution(attribution)
+
+        return self.execute_command(command, handler)
+
+    def record_project_operator_load(self, command: Command, load: ProjectOperatorLoadRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_project_operator_load(load)
+
+        return self.execute_command(command, handler)
+
+    def derive_project_status_rollup(self, command: Command, project_id: str) -> ProjectStatusRollup:
+        def handler(tx: KernelTransaction) -> ProjectStatusRollup:
+            return tx.derive_project_status_rollup(project_id)
+
+        return self.execute_command(command, handler)
+
+    def create_project_close_decision(
+        self,
+        command: Command,
+        project_id: str,
+        rollup_id: str | None = None,
+    ) -> ProjectCloseDecisionPacket:
+        def handler(tx: KernelTransaction) -> ProjectCloseDecisionPacket:
+            return tx.create_project_close_decision(project_id, rollup_id=rollup_id)
+
+        return self.execute_command(command, handler)
+
+    def compare_project_replay_to_projection(
+        self,
+        command: Command,
+        project_id: str,
+    ) -> ProjectReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> ProjectReplayProjectionComparison:
+            return tx.compare_project_replay_to_projection(project_id)
 
         return self.execute_command(command, handler)
 
@@ -295,17 +420,21 @@ class KernelStore:
         return self.execute_command(command, handler)
 
     def replay_critical_state(self) -> ReplayState:
+        with self.connect() as conn:
+            return self._replay_from_connection(conn)
+
+    @staticmethod
+    def _replay_from_connection(conn: sqlite3.Connection) -> ReplayState:
         state = ReplayState()
         expected_prev: str | None = None
-        with self.connect() as conn:
-            rows = conn.execute("SELECT * FROM events ORDER BY event_seq ASC").fetchall()
+        rows = conn.execute("SELECT * FROM events ORDER BY event_seq ASC").fetchall()
         for row in rows:
             if row["event_schema_version"] != KERNEL_EVENT_SCHEMA_VERSION:
                 raise ValueError(f"unsupported event schema version: {row['event_schema_version']}")
             if row["prev_event_hash"] != expected_prev:
                 raise ValueError("event hash chain mismatch")
             payload = _loads(row["payload_json"])
-            expected_hash = self._event_hash(
+            expected_hash = KernelStore._event_hash(
                 row["event_id"],
                 row["event_seq"],
                 row["event_schema_version"],
@@ -320,7 +449,7 @@ class KernelStore:
             if row["event_hash"] != expected_hash:
                 raise ValueError(f"event hash mismatch for {row['event_id']}")
             expected_prev = row["event_hash"]
-            self._apply_replay_event(state, row["event_type"], row["entity_id"], payload)
+            KernelStore._apply_replay_event(state, row["event_type"], row["entity_id"], payload)
         return state
 
     def legacy_authority_status(self) -> dict[str, str]:
@@ -425,6 +554,13 @@ class KernelStore:
             state.source_acquisition_checks[entity_id] = dict(payload)
         elif event_type == "decision_recorded":
             state.decisions[entity_id] = dict(payload)
+        elif event_type == "decision_resolved":
+            decision = state.decisions[entity_id]
+            decision["status"] = payload["status"]
+            decision["verdict"] = payload["verdict"]
+            decision["confidence"] = payload["confidence"]
+            decision["decided_at"] = payload["decided_at"]
+            decision["resolution"] = dict(payload)
         elif event_type == "quality_gate_evaluated":
             state.quality_gate_events[entity_id] = dict(payload)
         elif event_type == "evidence_bundle_committed":
@@ -433,6 +569,44 @@ class KernelStore:
             state.research_requests[payload["request_id"]]["updated_at"] = payload["created_at"]
         elif event_type == "commercial_decision_packet_created":
             state.commercial_decision_packets[entity_id] = dict(payload)
+        elif event_type == "project_created":
+            state.projects[entity_id] = dict(payload)
+        elif event_type == "project_task_created":
+            state.project_tasks[entity_id] = dict(payload)
+        elif event_type == "project_task_assigned":
+            state.project_task_assignments[entity_id] = dict(payload)
+            if payload["status"] == "accepted" and payload["task_id"] in state.project_tasks:
+                task = state.project_tasks[payload["task_id"]]
+                if task["status"] in {"queued", "blocked"}:
+                    task["status"] = "running"
+                    task["updated_at"] = payload["assigned_at"]
+                    task["last_assignment_id"] = entity_id
+        elif event_type == "project_task_transitioned":
+            task = state.project_tasks[entity_id]
+            task["status"] = payload["status"]
+            task["updated_at"] = payload["updated_at"]
+            task["last_transition"] = dict(payload)
+        elif event_type == "project_outcome_recorded":
+            state.project_outcomes[entity_id] = dict(payload)
+            if payload.get("task_id") in state.project_tasks:
+                task = state.project_tasks[payload["task_id"]]
+                if task["status"] not in {"completed", "failed", "cancelled"}:
+                    task["status"] = "completed"
+                    task["updated_at"] = payload["created_at"]
+        elif event_type == "project_artifact_receipt_recorded":
+            state.project_artifact_receipts[entity_id] = dict(payload)
+        elif event_type == "project_customer_feedback_recorded":
+            state.project_customer_feedback[entity_id] = dict(payload)
+        elif event_type == "project_revenue_attribution_recorded":
+            state.project_revenue_attributions[entity_id] = dict(payload)
+        elif event_type == "project_operator_load_recorded":
+            state.project_operator_load[entity_id] = dict(payload)
+        elif event_type == "project_status_rollup_derived":
+            state.project_status_rollups[entity_id] = dict(payload)
+        elif event_type == "project_close_decision_packet_created":
+            state.project_close_decision_packets[entity_id] = dict(payload)
+        elif event_type == "project_replay_projection_compared":
+            state.project_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "model_task_class_registered":
             state.model_task_classes[entity_id] = dict(payload)
         elif event_type == "model_candidate_registered":
@@ -1022,6 +1196,66 @@ class KernelTransaction:
         self.enqueue_projection(event_id, "decision_projection")
         return decision.decision_id
 
+    def resolve_decision(
+        self,
+        decision_id: str,
+        *,
+        verdict: str,
+        decided_by: str = "operator",
+        notes: str | None = None,
+        confidence: float | None = None,
+    ) -> str:
+        row = self.conn.execute(
+            """
+            SELECT decision_id, decision_type, status, required_authority,
+                   default_on_timeout, gate_packet_json
+            FROM decisions
+            WHERE decision_id=?
+            """,
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("decision not found")
+        if row["status"] not in {"gated", "deliberating", "proposed"}:
+            raise ValueError(f"cannot resolve decision from status {row['status']}")
+        if row["required_authority"] == "operator_gate" and self.command.requested_by != "operator":
+            raise PermissionError("operator-gate decisions require an operator command")
+        if self.command.requested_authority and self.command.requested_authority != row["required_authority"]:
+            raise PermissionError("command requested authority does not match Decision record")
+        options: list[str] = []
+        if row["gate_packet_json"]:
+            gate_packet = _loads(row["gate_packet_json"])
+            options = [str(option) for option in gate_packet.get("options", [])]
+        if options and verdict not in options:
+            raise ValueError("decision verdict is not one of the gate options")
+        if confidence is not None and not 0.0 <= confidence <= 1.0:
+            raise ValueError("decision resolution confidence must be between 0 and 1")
+        decided_at = now_iso()
+        payload = {
+            "decision_id": decision_id,
+            "decision_type": row["decision_type"],
+            "previous_status": row["status"],
+            "status": "decided",
+            "verdict": verdict,
+            "confidence": confidence,
+            "decided_by": decided_by,
+            "notes": notes,
+            "decided_at": decided_at,
+            "authority_required": row["required_authority"],
+            "default_on_timeout": row["default_on_timeout"],
+        }
+        event_id = self.append_event("decision_resolved", "decision", decision_id, payload, actor_type="operator", actor_id=decided_by)
+        self.conn.execute(
+            """
+            UPDATE decisions
+            SET status='decided', verdict=?, confidence=COALESCE(?, confidence), decided_at=?
+            WHERE decision_id=?
+            """,
+            (verdict, confidence, decided_at, decision_id),
+        )
+        self.enqueue_projection(event_id, "decision_projection")
+        return decision_id
+
     def commit_evidence_bundle(self, bundle: EvidenceBundle) -> str:
         row = self.conn.execute(
             "SELECT status, profile, source_policy_json, evidence_requirements_json FROM research_requests WHERE request_id=?",
@@ -1211,6 +1445,926 @@ class KernelTransaction:
         )
         self.enqueue_projection(event_id, "commercial_decision_packet_projection")
         return packet.packet_id
+
+    def create_project(self, project: Project) -> str:
+        if not project.name.strip() or not project.objective.strip():
+            raise ValueError("project name and objective are required")
+        if project.decision_packet_id:
+            packet = self.conn.execute(
+                """
+                SELECT decision_id, recommendation, status, project_json
+                FROM commercial_decision_packets
+                WHERE packet_id=?
+                """,
+                (project.decision_packet_id,),
+            ).fetchone()
+            if packet is None:
+                raise ValueError("project decision packet not found")
+            if packet["status"] != "gated":
+                raise ValueError("project creation requires a gated commercial decision packet")
+            if packet["decision_id"] != project.decision_id:
+                raise ValueError("project Decision id must match decision packet")
+            decision = self.conn.execute(
+                "SELECT status, verdict, required_authority FROM decisions WHERE decision_id=?",
+                (project.decision_id,),
+            ).fetchone()
+            if decision is None:
+                raise ValueError("project Decision record not found")
+            if decision["required_authority"] != "operator_gate":
+                raise PermissionError("G1 project creation requires operator-gate authority")
+            if decision["status"] != "decided" or decision["verdict"] != "approve_validation":
+                raise PermissionError("G1 project creation requires an approved validation verdict")
+        if project.status not in {"proposed", "active"}:
+            raise ValueError("new projects must start proposed or active")
+        if not project.phases:
+            raise ValueError("project requires at least one phase")
+        payload = _project_payload(project)
+        event_id = self.append_event("project_created", "project", project.project_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO projects (
+              project_id, opportunity_id, decision_packet_id, decision_id,
+              name, objective, revenue_mechanism, operator_role,
+              external_commitment_policy, budget_id, phases_json,
+              success_metrics_json, kill_criteria_json, evidence_refs_json,
+              status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project.project_id,
+                project.opportunity_id,
+                project.decision_packet_id,
+                project.decision_id,
+                project.name,
+                project.objective,
+                project.revenue_mechanism,
+                project.operator_role,
+                project.external_commitment_policy,
+                project.budget_id,
+                canonical_json(project.phases),
+                canonical_json(project.success_metrics),
+                canonical_json(project.kill_criteria),
+                canonical_json(project.evidence_refs),
+                project.status,
+                project.created_at,
+                project.updated_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_projection")
+        return project.project_id
+
+    def create_project_task(self, task: ProjectTask) -> str:
+        project = self.conn.execute(
+            "SELECT project_id, status, budget_id FROM projects WHERE project_id=?",
+            (task.project_id,),
+        ).fetchone()
+        if project is None:
+            raise ValueError("project task requires an existing project")
+        if project["status"] not in {"active", "paused", "blocked"}:
+            raise ValueError(f"cannot create project task from project status {project['status']}")
+        if task.task_type in {"build", "ship"} and task.authority_required not in {"single_agent", "council", "operator_gate"}:
+            raise PermissionError("build and ship tasks require assigned non-rule authority")
+        if task.task_type == "ship" and task.authority_required != "operator_gate":
+            raise PermissionError("shipping tasks require operator-gate authority")
+        if task.risk_level in {"high", "critical"} and task.authority_required not in {"council", "operator_gate"}:
+            raise PermissionError("high-risk project tasks require council or operator-gate authority")
+        if not task.objective.strip():
+            raise ValueError("project task objective is required")
+        if not task.required_capabilities:
+            raise ValueError("project task must declare required capabilities, even when empty-by-policy")
+        policy_version = task.policy_version or KERNEL_POLICY_VERSION
+        command_id = task.command_id or self.command.command_id
+        idempotency_key = task.idempotency_key or self.command.idempotency_key
+        payload = _project_task_payload(
+            task,
+            command_id=command_id,
+            policy_version=policy_version,
+            idempotency_key=idempotency_key,
+        )
+        event_id = self.append_event("project_task_created", "task", task.task_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_tasks (
+              task_id, project_id, phase_name, task_type, autonomy_class, objective,
+              inputs_json, expected_output_schema_json, risk_level,
+              required_capabilities_json, model_requirement_json, budget_id,
+              deadline, status, authority_required, recovery_policy, command_id,
+              policy_version, idempotency_key, evidence_refs_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task.task_id,
+                task.project_id,
+                task.phase_name,
+                task.task_type,
+                task.autonomy_class,
+                task.objective,
+                canonical_json(task.inputs),
+                canonical_json(task.expected_output_schema) if task.expected_output_schema is not None else None,
+                task.risk_level,
+                canonical_json(task.required_capabilities),
+                canonical_json(task.model_requirement),
+                task.budget_id,
+                task.deadline,
+                task.status,
+                task.authority_required,
+                task.recovery_policy,
+                command_id,
+                policy_version,
+                idempotency_key,
+                canonical_json(task.evidence_refs),
+                task.created_at,
+                task.updated_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_task_projection")
+        return task.task_id
+
+    def assign_project_task(self, assignment: ProjectTaskAssignment) -> str:
+        row = self.conn.execute(
+            """
+            SELECT task_id, project_id, status, required_capabilities_json
+            FROM project_tasks
+            WHERE task_id=?
+            """,
+            (assignment.task_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("project task assignment requires an existing task")
+        if row["project_id"] != assignment.project_id:
+            raise ValueError("project task assignment project/task mismatch")
+        if row["status"] not in {"queued", "blocked"}:
+            raise ValueError(f"cannot assign project task from status {row['status']}")
+        if not assignment.worker_id.strip():
+            raise ValueError("project task assignment requires a worker id")
+        if assignment.status == "accepted" and not assignment.accepted_capabilities:
+            raise ValueError("accepted project task assignment must record accepted capabilities")
+        for grant_id in assignment.grant_ids:
+            grant = self.conn.execute(
+                """
+                SELECT task_id, status, policy_version
+                FROM capability_grants
+                WHERE grant_id=?
+                """,
+                (grant_id,),
+            ).fetchone()
+            if grant is None:
+                raise PermissionError("project task assignment references unknown grant")
+            if grant["task_id"] != assignment.task_id:
+                raise PermissionError("project task assignment grant/task mismatch")
+            if grant["status"] != "active" or grant["policy_version"] != KERNEL_POLICY_VERSION:
+                raise PermissionError("project task assignment requires active current-policy grants")
+        payload = _project_task_assignment_payload(assignment)
+        event_id = self.append_event("project_task_assigned", "task", assignment.assignment_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_task_assignments (
+              assignment_id, task_id, project_id, worker_type, worker_id,
+              route_decision_id, grant_ids_json, accepted_capabilities_json,
+              status, notes, assigned_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                assignment.assignment_id,
+                assignment.task_id,
+                assignment.project_id,
+                assignment.worker_type,
+                assignment.worker_id,
+                assignment.route_decision_id,
+                canonical_json(assignment.grant_ids),
+                canonical_json(assignment.accepted_capabilities),
+                assignment.status,
+                assignment.notes,
+                assignment.assigned_at,
+            ),
+        )
+        if assignment.status == "accepted":
+            self.conn.execute(
+                "UPDATE project_tasks SET status='running', updated_at=? WHERE task_id=?",
+                (assignment.assigned_at, assignment.task_id),
+            )
+        self.enqueue_projection(event_id, "project_task_assignment_projection")
+        return assignment.assignment_id
+
+    def transition_project_task(self, task_id: str, status: str, reason: str) -> str:
+        valid_statuses = {"queued", "running", "blocked", "completed", "failed", "cancelled"}
+        if status not in valid_statuses:
+            raise ValueError(f"unknown project task status: {status}")
+        if not reason.strip():
+            raise ValueError("project task transition requires a reason")
+        row = self.conn.execute("SELECT status, authority_required FROM project_tasks WHERE task_id=?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError("project task not found")
+        valid_transitions = {
+            "queued": {"running", "blocked", "cancelled"},
+            "running": {"completed", "blocked", "failed", "cancelled"},
+            "blocked": {"running", "failed", "cancelled"},
+            "completed": set(),
+            "failed": set(),
+            "cancelled": set(),
+        }
+        if status not in valid_transitions[row["status"]]:
+            raise ValueError(f"invalid project task transition {row['status']} -> {status}")
+        if status == "running":
+            assignment = self.conn.execute(
+                """
+                SELECT assignment_id
+                FROM project_task_assignments
+                WHERE task_id=? AND status='accepted'
+                ORDER BY assigned_at DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            if assignment is None:
+                raise PermissionError("project tasks require an accepted assignment before running")
+        if row["authority_required"] == "operator_gate" and status in {"running", "completed"} and self.command.requested_by != "operator":
+            raise PermissionError("operator-gated project tasks require operator transition authority")
+        updated_at = now_iso()
+        payload = {
+            "task_id": task_id,
+            "previous_status": row["status"],
+            "status": status,
+            "reason": reason,
+            "updated_at": updated_at,
+            "authority_required": row["authority_required"],
+        }
+        event_id = self.append_event("project_task_transitioned", "task", task_id, payload)
+        self.conn.execute(
+            "UPDATE project_tasks SET status=?, updated_at=? WHERE task_id=?",
+            (status, updated_at, task_id),
+        )
+        self.enqueue_projection(event_id, "project_task_projection")
+        return task_id
+
+    def record_project_outcome(self, outcome: ProjectOutcome) -> str:
+        project = self.conn.execute("SELECT status FROM projects WHERE project_id=?", (outcome.project_id,)).fetchone()
+        if project is None:
+            raise ValueError("project outcome requires an existing project")
+        if outcome.task_id:
+            task = self.conn.execute(
+                "SELECT project_id, status FROM project_tasks WHERE task_id=?",
+                (outcome.task_id,),
+            ).fetchone()
+            if task is None:
+                raise ValueError("project outcome references unknown task")
+            if task["project_id"] != outcome.project_id:
+                raise ValueError("project outcome task/project mismatch")
+            if task["status"] not in {"running", "completed"}:
+                raise ValueError("project outcome task must be running or completed")
+        if not outcome.summary.strip():
+            raise ValueError("project outcome summary is required")
+        payload = _project_outcome_payload(outcome)
+        event_id = self.append_event("project_outcome_recorded", "project", outcome.outcome_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_outcomes (
+              outcome_id, project_id, task_id, phase_name, outcome_type, summary,
+              artifact_refs_json, metrics_json, feedback_json, revenue_impact_json,
+              operator_load_actual, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                outcome.outcome_id,
+                outcome.project_id,
+                outcome.task_id,
+                outcome.phase_name,
+                outcome.outcome_type,
+                outcome.summary,
+                canonical_json(outcome.artifact_refs),
+                canonical_json(outcome.metrics),
+                canonical_json(outcome.feedback),
+                canonical_json(outcome.revenue_impact),
+                outcome.operator_load_actual,
+                outcome.status,
+                outcome.created_at,
+            ),
+        )
+        if outcome.task_id:
+            self.conn.execute(
+                "UPDATE project_tasks SET status='completed', updated_at=? WHERE task_id=? AND status!='completed'",
+                (outcome.created_at, outcome.task_id),
+            )
+        self.enqueue_projection(event_id, "project_outcome_projection")
+        return outcome.outcome_id
+
+    def record_project_artifact_receipt(self, receipt: ProjectArtifactReceipt) -> str:
+        self._require_project(receipt.project_id)
+        if receipt.task_id:
+            self._require_project_task(receipt.project_id, receipt.task_id)
+        if not receipt.artifact_ref.strip() or not receipt.summary.strip():
+            raise ValueError("artifact receipt requires an artifact ref and summary")
+        if receipt.customer_visible and receipt.artifact_kind != "shipped_artifact":
+            raise ValueError("customer-visible artifact receipts must be shipped artifacts")
+        if receipt.artifact_kind == "shipped_artifact" and not receipt.side_effect_receipt_id:
+            raise PermissionError("shipped artifacts require a durable side-effect receipt")
+        if receipt.side_effect_receipt_id:
+            side_effect = self.conn.execute(
+                """
+                SELECT r.receipt_id, r.intent_id, r.receipt_type, i.task_id
+                FROM side_effect_receipts r
+                JOIN side_effect_intents i ON i.intent_id = r.intent_id
+                WHERE r.receipt_id=?
+                """,
+                (receipt.side_effect_receipt_id,),
+            ).fetchone()
+            if side_effect is None:
+                raise ValueError("artifact receipt references unknown side-effect receipt")
+            if side_effect["receipt_type"] != "success":
+                raise PermissionError("shipped artifact receipt requires successful side-effect execution")
+            if receipt.task_id and side_effect["task_id"] != receipt.task_id:
+                raise ValueError("artifact side-effect task does not match project task")
+            if receipt.side_effect_intent_id and side_effect["intent_id"] != receipt.side_effect_intent_id:
+                raise ValueError("artifact side-effect intent/receipt mismatch")
+        payload = _project_artifact_receipt_payload(receipt)
+        event_id = self.append_event(
+            "project_artifact_receipt_recorded",
+            "artifact",
+            receipt.receipt_id,
+            payload,
+            receipt.data_class,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO project_artifact_receipts (
+              receipt_id, project_id, task_id, artifact_ref, artifact_kind, summary,
+              data_class, delivery_channel, side_effect_intent_id,
+              side_effect_receipt_id, customer_visible, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt.receipt_id,
+                receipt.project_id,
+                receipt.task_id,
+                receipt.artifact_ref,
+                receipt.artifact_kind,
+                receipt.summary,
+                receipt.data_class,
+                receipt.delivery_channel,
+                receipt.side_effect_intent_id,
+                receipt.side_effect_receipt_id,
+                int(receipt.customer_visible),
+                receipt.status,
+                receipt.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_artifact_projection")
+        return receipt.receipt_id
+
+    def record_project_customer_feedback(self, feedback: ProjectCustomerFeedback) -> str:
+        self._require_project(feedback.project_id)
+        if feedback.task_id:
+            self._require_project_task(feedback.project_id, feedback.task_id)
+        if feedback.artifact_receipt_id:
+            artifact = self.conn.execute(
+                "SELECT project_id FROM project_artifact_receipts WHERE receipt_id=?",
+                (feedback.artifact_receipt_id,),
+            ).fetchone()
+            if artifact is None:
+                raise ValueError("feedback references unknown artifact receipt")
+            if artifact["project_id"] != feedback.project_id:
+                raise ValueError("feedback artifact/project mismatch")
+        if feedback.source_type == "customer" and not (feedback.customer_ref or feedback.evidence_refs):
+            raise ValueError("customer feedback requires a customer ref or evidence reference")
+        if not feedback.summary.strip():
+            raise ValueError("feedback summary is required")
+        payload = _project_customer_feedback_payload(feedback)
+        event_id = self.append_event("project_customer_feedback_recorded", "project", feedback.feedback_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_customer_feedback (
+              feedback_id, project_id, task_id, artifact_receipt_id, source_type,
+              customer_ref, summary, sentiment, evidence_refs_json,
+              action_required, operator_review_required, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                feedback.feedback_id,
+                feedback.project_id,
+                feedback.task_id,
+                feedback.artifact_receipt_id,
+                feedback.source_type,
+                feedback.customer_ref,
+                feedback.summary,
+                feedback.sentiment,
+                canonical_json(feedback.evidence_refs),
+                int(feedback.action_required),
+                int(feedback.operator_review_required),
+                feedback.status,
+                feedback.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_feedback_projection")
+        return feedback.feedback_id
+
+    def record_project_revenue_attribution(self, attribution: ProjectRevenueAttribution) -> str:
+        self._require_project(attribution.project_id)
+        if attribution.task_id:
+            self._require_project_task(attribution.project_id, attribution.task_id)
+        if attribution.outcome_id:
+            outcome = self.conn.execute(
+                "SELECT project_id FROM project_outcomes WHERE outcome_id=?",
+                (attribution.outcome_id,),
+            ).fetchone()
+            if outcome is None:
+                raise ValueError("revenue attribution references unknown outcome")
+            if outcome["project_id"] != attribution.project_id:
+                raise ValueError("revenue attribution outcome/project mismatch")
+        if attribution.amount_usd < Decimal("0"):
+            raise ValueError("revenue attribution amount must be non-negative")
+        if not 0.0 <= attribution.confidence <= 1.0:
+            raise ValueError("revenue attribution confidence must be between 0 and 1")
+        if attribution.status == "reconciled" and not (attribution.external_ref or attribution.evidence_refs):
+            raise ValueError("reconciled revenue attribution requires external ref or evidence")
+        reconciliation_task_id = attribution.reconciliation_task_id
+        if attribution.status == "needs_reconciliation" and reconciliation_task_id is None:
+            task = ProjectTask(
+                project_id=attribution.project_id,
+                phase_name="Operate",
+                task_type="operate",
+                autonomy_class="A1",
+                objective="Reconcile missing or low-confidence project revenue attribution evidence.",
+                inputs={
+                    "attribution_id": attribution.attribution_id,
+                    "source": attribution.source,
+                    "amount_usd": str(attribution.amount_usd),
+                    "external_ref": attribution.external_ref,
+                },
+                expected_output_schema={
+                    "type": "object",
+                    "required": ["reconciliation_result", "evidence_refs", "operator_load_actual"],
+                },
+                risk_level="low",
+                required_capabilities=[
+                    {
+                        "capability_type": "memory_write",
+                        "actions": ["record"],
+                        "scope": "project_revenue_reconciliation",
+                        "grant_required_before_run": True,
+                    }
+                ],
+                model_requirement={"task_class": "quick_research_summarization", "local_allowed_only_if_promoted": True},
+                authority_required="rule",
+                recovery_policy="ask_operator",
+            )
+            reconciliation_task_id = self.create_project_task(task)
+        payload = _project_revenue_attribution_payload(attribution, reconciliation_task_id=reconciliation_task_id)
+        event_id = self.append_event("project_revenue_attribution_recorded", "project", attribution.attribution_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_revenue_attributions (
+              attribution_id, project_id, task_id, outcome_id, amount_usd,
+              source, attribution_period, external_ref, evidence_refs_json,
+              confidence, reconciliation_task_id, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                attribution.attribution_id,
+                attribution.project_id,
+                attribution.task_id,
+                attribution.outcome_id,
+                str(attribution.amount_usd),
+                attribution.source,
+                attribution.attribution_period,
+                attribution.external_ref,
+                canonical_json(attribution.evidence_refs),
+                attribution.confidence,
+                reconciliation_task_id,
+                attribution.status,
+                attribution.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_revenue_projection")
+        return attribution.attribution_id
+
+    def record_project_operator_load(self, load: ProjectOperatorLoadRecord) -> str:
+        self._require_project(load.project_id)
+        if load.task_id:
+            self._require_project_task(load.project_id, load.task_id)
+        if load.outcome_id:
+            outcome = self.conn.execute(
+                "SELECT project_id FROM project_outcomes WHERE outcome_id=?",
+                (load.outcome_id,),
+            ).fetchone()
+            if outcome is None:
+                raise ValueError("operator load references unknown outcome")
+            if outcome["project_id"] != load.project_id:
+                raise ValueError("operator load outcome/project mismatch")
+        if load.minutes < 0:
+            raise ValueError("operator load minutes must be non-negative")
+        if not load.source.strip():
+            raise ValueError("operator load source is required")
+        payload = _project_operator_load_payload(load)
+        event_id = self.append_event("project_operator_load_recorded", "project", load.load_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_operator_load (
+              load_id, project_id, task_id, outcome_id, minutes,
+              load_type, source, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                load.load_id,
+                load.project_id,
+                load.task_id,
+                load.outcome_id,
+                load.minutes,
+                load.load_type,
+                load.source,
+                load.notes,
+                load.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_operator_load_projection")
+        return load.load_id
+
+    def derive_project_status_rollup(self, project_id: str) -> ProjectStatusRollup:
+        project = self._require_project(project_id)
+        phases = self._project_phase_names(project_id)
+        phase_rollups = [self._derive_project_phase_rollup(project_id, phase_name) for phase_name in phases]
+        task_counts = self._project_task_counts(project_id)
+        outcome_counts = self._project_outcome_counts(project_id)
+        artifact_count = self._count_project_rows("project_artifact_receipts", project_id)
+        feedback_count = self._count_project_rows("project_customer_feedback", project_id)
+        revenue_total = self._project_revenue_total(project_id)
+        load_minutes = self._project_operator_load_minutes(project_id)
+        risk_flags: list[str] = []
+        if task_counts.get("failed", 0):
+            risk_flags.append("failed_tasks")
+        if task_counts.get("blocked", 0):
+            risk_flags.append("blocked_tasks")
+        if feedback_count and not revenue_total:
+            risk_flags.append("feedback_without_revenue")
+        recommended_status = project["status"]
+        close_recommendation = "continue"
+        if task_counts.get("failed", 0) or any(phase.status == "failed" for phase in phase_rollups):
+            recommended_status = "kill_recommended"
+            close_recommendation = "kill"
+        elif task_counts.get("blocked", 0):
+            recommended_status = "blocked"
+            close_recommendation = "pause"
+        elif task_counts.get("completed", 0) and not any(
+            task_counts.get(status, 0) for status in ("queued", "running", "blocked", "failed")
+        ):
+            recommended_status = "complete"
+            close_recommendation = "complete"
+        rationale = (
+            f"{task_counts.get('completed', 0)} completed tasks, "
+            f"{task_counts.get('blocked', 0)} blocked tasks, "
+            f"{task_counts.get('failed', 0)} failed tasks, "
+            f"{revenue_total} USD attributed, {load_minutes} operator minutes."
+        )
+        rollup = ProjectStatusRollup(
+            project_id=project_id,
+            project_status=project["status"],
+            phase_rollups=phase_rollups,
+            task_counts=task_counts,
+            outcome_counts=outcome_counts,
+            artifact_count=artifact_count,
+            customer_feedback_count=feedback_count,
+            revenue_attributed_usd=revenue_total,
+            operator_load_minutes=load_minutes,
+            recommended_status=recommended_status,
+            close_recommendation=close_recommendation,  # type: ignore[arg-type]
+            rationale=rationale,
+            risk_flags=risk_flags,
+        )
+        payload = _project_status_rollup_payload(rollup)
+        event_id = self.append_event("project_status_rollup_derived", "project", rollup.rollup_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_status_rollups (
+              rollup_id, project_id, project_status, phase_rollups_json,
+              task_counts_json, outcome_counts_json, artifact_count,
+              customer_feedback_count, revenue_attributed_usd, operator_load_minutes,
+              recommended_status, close_recommendation, rationale, risk_flags_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rollup.rollup_id,
+                rollup.project_id,
+                rollup.project_status,
+                canonical_json(payload["phase_rollups"]),
+                canonical_json(rollup.task_counts),
+                canonical_json(rollup.outcome_counts),
+                rollup.artifact_count,
+                rollup.customer_feedback_count,
+                str(rollup.revenue_attributed_usd),
+                rollup.operator_load_minutes,
+                rollup.recommended_status,
+                rollup.close_recommendation,
+                rollup.rationale,
+                canonical_json(rollup.risk_flags),
+                rollup.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_status_rollup_projection")
+        return rollup
+
+    def create_project_close_decision(self, project_id: str, *, rollup_id: str | None = None) -> ProjectCloseDecisionPacket:
+        self._require_project(project_id)
+        if rollup_id is None:
+            rollup = self.derive_project_status_rollup(project_id)
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM project_status_rollups WHERE rollup_id=? AND project_id=?",
+                (rollup_id, project_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("project close decision requires a rollup for the project")
+            rollup = _rollup_from_row(row)
+        decision = Decision(
+            decision_type="project_close",
+            question=f"Should project {project_id} close, pause, continue, or be killed?",
+            options=[
+                {"verdict": "continue", "effect": "keep project active"},
+                {"verdict": "complete", "effect": "mark project complete after operator approval"},
+                {"verdict": "pause", "effect": "pause project without external side effects"},
+                {"verdict": "kill", "effect": "recommend kill path; no customer obligations are cancelled"},
+            ],
+            stakes="medium",
+            evidence_bundle_ids=[],
+            evidence_refs=[f"kernel:project_status_rollups/{rollup.rollup_id}"],
+            requested_by="project",
+            required_authority="operator_gate",
+            authority_policy_version=KERNEL_POLICY_VERSION,
+            status="gated",
+            recommendation=rollup.close_recommendation,
+            confidence=0.75 if rollup.close_recommendation != "continue" else 0.6,
+            decisive_factors=[rollup.rationale],
+            risk_flags=rollup.risk_flags,
+            default_on_timeout="continue",
+            gate_packet={
+                "project_id": project_id,
+                "rollup_id": rollup.rollup_id,
+                "side_effects_authorized": [],
+                "default_on_timeout": "continue",
+            },
+        )
+        self.create_decision(decision)
+        packet = ProjectCloseDecisionPacket(
+            project_id=project_id,
+            decision_id=decision.decision_id,
+            rollup_id=rollup.rollup_id,
+            recommendation=rollup.close_recommendation,
+            required_authority="operator_gate",
+            rationale=rollup.rationale,
+            risk_flags=rollup.risk_flags,
+            default_on_timeout="continue",
+        )
+        payload = _project_close_decision_packet_payload(packet)
+        event_id = self.append_event("project_close_decision_packet_created", "decision", packet.packet_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_close_decision_packets (
+              packet_id, project_id, decision_id, rollup_id, recommendation,
+              required_authority, rationale, risk_flags_json, default_on_timeout,
+              status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                packet.packet_id,
+                packet.project_id,
+                packet.decision_id,
+                packet.rollup_id,
+                packet.recommendation,
+                packet.required_authority,
+                packet.rationale,
+                canonical_json(packet.risk_flags),
+                packet.default_on_timeout,
+                packet.status,
+                packet.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_close_decision_projection")
+        return packet
+
+    def compare_project_replay_to_projection(self, project_id: str) -> ProjectReplayProjectionComparison:
+        self._require_project(project_id)
+        replay = KernelStore._replay_from_connection(self.conn)
+        replay_project = replay.projects.get(project_id)
+        replay_task_counts = _count_by_status(
+            task for task in replay.project_tasks.values() if task.get("project_id") == project_id
+        )
+        projection_task_counts = self._project_task_counts(project_id)
+        replay_revenue = sum(
+            (Decimal(item["amount_usd"]) for item in replay.project_revenue_attributions.values() if item.get("project_id") == project_id),
+            Decimal("0"),
+        )
+        projection_revenue = self._project_revenue_total(project_id)
+        replay_load = sum(
+            int(item["minutes"]) for item in replay.project_operator_load.values() if item.get("project_id") == project_id
+        )
+        projection_load = self._project_operator_load_minutes(project_id)
+        projection_status = self.conn.execute(
+            "SELECT status FROM projects WHERE project_id=?",
+            (project_id,),
+        ).fetchone()["status"]
+        mismatches: list[str] = []
+        if (replay_project or {}).get("status") != projection_status:
+            mismatches.append("project_status")
+        if replay_task_counts != projection_task_counts:
+            mismatches.append("task_counts")
+        if replay_revenue != projection_revenue:
+            mismatches.append("revenue_attributed_usd")
+        if replay_load != projection_load:
+            mismatches.append("operator_load_minutes")
+        comparison = ProjectReplayProjectionComparison(
+            project_id=project_id,
+            replay_project_status=(replay_project or {}).get("status"),
+            projection_project_status=projection_status,
+            replay_task_counts=replay_task_counts,
+            projection_task_counts=projection_task_counts,
+            replay_revenue_attributed_usd=replay_revenue,
+            projection_revenue_attributed_usd=projection_revenue,
+            replay_operator_load_minutes=replay_load,
+            projection_operator_load_minutes=projection_load,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _project_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event("project_replay_projection_compared", "project", comparison.comparison_id, payload)
+        self.conn.execute(
+            """
+            INSERT INTO project_replay_projection_comparisons (
+              comparison_id, project_id, replay_project_status, projection_project_status,
+              replay_task_counts_json, projection_task_counts_json,
+              replay_revenue_attributed_usd, projection_revenue_attributed_usd,
+              replay_operator_load_minutes, projection_operator_load_minutes,
+              matches, mismatches_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.project_id,
+                comparison.replay_project_status,
+                comparison.projection_project_status,
+                canonical_json(comparison.replay_task_counts),
+                canonical_json(comparison.projection_task_counts),
+                str(comparison.replay_revenue_attributed_usd),
+                str(comparison.projection_revenue_attributed_usd),
+                comparison.replay_operator_load_minutes,
+                comparison.projection_operator_load_minutes,
+                int(comparison.matches),
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "project_replay_projection_comparison_projection")
+        return comparison
+
+    def _project_phase_names(self, project_id: str) -> list[str]:
+        row = self.conn.execute("SELECT phases_json FROM projects WHERE project_id=?", (project_id,)).fetchone()
+        phases = _loads(row["phases_json"]) if row else []
+        names = [phase.get("name") or phase.get("phase_name") for phase in phases if phase.get("name") or phase.get("phase_name")]
+        task_rows = self.conn.execute(
+            "SELECT DISTINCT phase_name FROM project_tasks WHERE project_id=? AND phase_name IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        for task_row in task_rows:
+            if task_row["phase_name"] not in names:
+                names.append(task_row["phase_name"])
+        return names or ["Unphased"]
+
+    def _derive_project_phase_rollup(self, project_id: str, phase_name: str) -> ProjectPhaseRollup:
+        task_counts = self._project_task_counts(project_id, phase_name=phase_name)
+        outcome_counts = self._project_outcome_counts(project_id, phase_name=phase_name)
+        artifact_count = self._count_project_rows("project_artifact_receipts", project_id, phase_name=phase_name)
+        feedback_count = self._count_project_rows("project_customer_feedback", project_id, phase_name=phase_name)
+        revenue_total = self._project_revenue_total(project_id, phase_name=phase_name)
+        load_minutes = self._project_operator_load_minutes(project_id, phase_name=phase_name)
+        last_activity_at = self._project_phase_last_activity(project_id, phase_name)
+        if not sum(task_counts.values()):
+            status = "not_started"
+        elif task_counts.get("failed", 0):
+            status = "failed"
+        elif task_counts.get("blocked", 0):
+            status = "blocked"
+        elif task_counts.get("running", 0) or task_counts.get("queued", 0):
+            status = "active"
+        elif task_counts.get("completed", 0):
+            status = "complete"
+        else:
+            status = "at_risk"
+        return ProjectPhaseRollup(
+            phase_name=phase_name,
+            task_counts=task_counts,
+            outcome_counts=outcome_counts,
+            artifact_count=artifact_count,
+            customer_feedback_count=feedback_count,
+            revenue_attributed_usd=revenue_total,
+            operator_load_minutes=load_minutes,
+            status=status,  # type: ignore[arg-type]
+            last_activity_at=last_activity_at,
+        )
+
+    def _project_task_counts(self, project_id: str, *, phase_name: str | None = None) -> dict[str, int]:
+        params: list[Any] = [project_id]
+        clause = "project_id=?"
+        if phase_name is not None:
+            clause += " AND COALESCE(phase_name, 'Unphased')=?"
+            params.append(phase_name)
+        rows = self.conn.execute(
+            f"SELECT status, COUNT(*) AS count FROM project_tasks WHERE {clause} GROUP BY status",
+            params,
+        ).fetchall()
+        return {row["status"]: int(row["count"]) for row in rows}
+
+    def _project_outcome_counts(self, project_id: str, *, phase_name: str | None = None) -> dict[str, int]:
+        params: list[Any] = [project_id]
+        clause = "project_id=?"
+        if phase_name is not None:
+            clause += " AND COALESCE(phase_name, 'Unphased')=?"
+            params.append(phase_name)
+        rows = self.conn.execute(
+            f"SELECT outcome_type, COUNT(*) AS count FROM project_outcomes WHERE {clause} GROUP BY outcome_type",
+            params,
+        ).fetchall()
+        return {row["outcome_type"]: int(row["count"]) for row in rows}
+
+    def _count_project_rows(self, table: str, project_id: str, *, phase_name: str | None = None) -> int:
+        allowed = {"project_artifact_receipts", "project_customer_feedback"}
+        if table not in allowed:
+            raise ValueError("unsupported project count table")
+        if phase_name is None:
+            return int(self.conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE project_id=?", (project_id,)).fetchone()["count"])
+        return int(
+            self.conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM {table} r
+                LEFT JOIN project_tasks t ON t.task_id = r.task_id
+                WHERE r.project_id=? AND COALESCE(t.phase_name, 'Unphased')=?
+                """,
+                (project_id, phase_name),
+            ).fetchone()["count"]
+        )
+
+    def _project_revenue_total(self, project_id: str, *, phase_name: str | None = None) -> Decimal:
+        if phase_name is None:
+            rows = self.conn.execute(
+                "SELECT amount_usd FROM project_revenue_attributions WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT r.amount_usd
+                FROM project_revenue_attributions r
+                LEFT JOIN project_tasks t ON t.task_id = r.task_id
+                WHERE r.project_id=? AND COALESCE(t.phase_name, 'Unphased')=?
+                """,
+                (project_id, phase_name),
+            ).fetchall()
+        return sum((Decimal(row["amount_usd"]) for row in rows), Decimal("0"))
+
+    def _project_operator_load_minutes(self, project_id: str, *, phase_name: str | None = None) -> int:
+        if phase_name is None:
+            row = self.conn.execute(
+                "SELECT COALESCE(SUM(minutes), 0) AS minutes FROM project_operator_load WHERE project_id=?",
+                (project_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(l.minutes), 0) AS minutes
+                FROM project_operator_load l
+                LEFT JOIN project_tasks t ON t.task_id = l.task_id
+                WHERE l.project_id=? AND COALESCE(t.phase_name, 'Unphased')=?
+                """,
+                (project_id, phase_name),
+            ).fetchone()
+        return int(row["minutes"])
+
+    def _project_phase_last_activity(self, project_id: str, phase_name: str) -> str | None:
+        rows = self.conn.execute(
+            """
+            SELECT MAX(created_at) AS last_activity_at FROM (
+              SELECT created_at FROM project_tasks WHERE project_id=? AND COALESCE(phase_name, 'Unphased')=?
+              UNION ALL
+              SELECT created_at FROM project_outcomes WHERE project_id=? AND COALESCE(phase_name, 'Unphased')=?
+            )
+            """,
+            (project_id, phase_name, project_id, phase_name),
+        ).fetchone()
+        return rows["last_activity_at"] if rows else None
+
+    def _require_project(self, project_id: str) -> sqlite3.Row:
+        project = self.conn.execute("SELECT project_id, status FROM projects WHERE project_id=?", (project_id,)).fetchone()
+        if project is None:
+            raise ValueError("project record requires an existing project")
+        return project
+
+    def _require_project_task(self, project_id: str, task_id: str) -> sqlite3.Row:
+        task = self.conn.execute(
+            "SELECT task_id, project_id FROM project_tasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        if task is None:
+            raise ValueError("project record references unknown task")
+        if task["project_id"] != project_id:
+            raise ValueError("project record task/project mismatch")
+        return task
 
     def register_model_task_class(self, task_class: ModelTaskClassRecord) -> str:
         if task_class.expansion_allowed:
@@ -2143,6 +3297,278 @@ def _commercial_decision_packet_payload(packet: Any) -> dict[str, Any]:
         "status": packet.status,
         "created_at": packet.created_at,
     }
+
+
+def _project_payload(project: Any) -> dict[str, Any]:
+    return {
+        "project_id": project.project_id,
+        "opportunity_id": project.opportunity_id,
+        "decision_packet_id": project.decision_packet_id,
+        "decision_id": project.decision_id,
+        "name": project.name,
+        "objective": project.objective,
+        "revenue_mechanism": project.revenue_mechanism,
+        "operator_role": project.operator_role,
+        "external_commitment_policy": project.external_commitment_policy,
+        "budget_id": project.budget_id,
+        "phases": project.phases,
+        "success_metrics": project.success_metrics,
+        "kill_criteria": project.kill_criteria,
+        "evidence_refs": project.evidence_refs,
+        "status": project.status,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+    }
+
+
+def _project_task_payload(
+    task: Any,
+    *,
+    command_id: str,
+    policy_version: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "project_id": task.project_id,
+        "phase_name": task.phase_name,
+        "task_type": task.task_type,
+        "autonomy_class": task.autonomy_class,
+        "objective": task.objective,
+        "inputs": task.inputs,
+        "expected_output_schema": task.expected_output_schema,
+        "risk_level": task.risk_level,
+        "required_capabilities": task.required_capabilities,
+        "model_requirement": task.model_requirement,
+        "budget_id": task.budget_id,
+        "deadline": task.deadline,
+        "status": task.status,
+        "authority_required": task.authority_required,
+        "recovery_policy": task.recovery_policy,
+        "command_id": command_id,
+        "policy_version": policy_version,
+        "idempotency_key": idempotency_key,
+        "evidence_refs": task.evidence_refs,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def _project_task_assignment_payload(assignment: Any) -> dict[str, Any]:
+    return {
+        "assignment_id": assignment.assignment_id,
+        "task_id": assignment.task_id,
+        "project_id": assignment.project_id,
+        "worker_type": assignment.worker_type,
+        "worker_id": assignment.worker_id,
+        "route_decision_id": assignment.route_decision_id,
+        "grant_ids": assignment.grant_ids,
+        "accepted_capabilities": assignment.accepted_capabilities,
+        "status": assignment.status,
+        "notes": assignment.notes,
+        "assigned_at": assignment.assigned_at,
+    }
+
+
+def _project_outcome_payload(outcome: Any) -> dict[str, Any]:
+    return {
+        "outcome_id": outcome.outcome_id,
+        "project_id": outcome.project_id,
+        "task_id": outcome.task_id,
+        "phase_name": outcome.phase_name,
+        "outcome_type": outcome.outcome_type,
+        "summary": outcome.summary,
+        "artifact_refs": outcome.artifact_refs,
+        "metrics": outcome.metrics,
+        "feedback": outcome.feedback,
+        "revenue_impact": outcome.revenue_impact,
+        "operator_load_actual": outcome.operator_load_actual,
+        "status": outcome.status,
+        "created_at": outcome.created_at,
+    }
+
+
+def _project_artifact_receipt_payload(receipt: Any) -> dict[str, Any]:
+    return {
+        "receipt_id": receipt.receipt_id,
+        "project_id": receipt.project_id,
+        "task_id": receipt.task_id,
+        "artifact_ref": receipt.artifact_ref,
+        "artifact_kind": receipt.artifact_kind,
+        "summary": receipt.summary,
+        "data_class": receipt.data_class,
+        "delivery_channel": receipt.delivery_channel,
+        "side_effect_intent_id": receipt.side_effect_intent_id,
+        "side_effect_receipt_id": receipt.side_effect_receipt_id,
+        "customer_visible": receipt.customer_visible,
+        "status": receipt.status,
+        "created_at": receipt.created_at,
+    }
+
+
+def _project_customer_feedback_payload(feedback: Any) -> dict[str, Any]:
+    return {
+        "feedback_id": feedback.feedback_id,
+        "project_id": feedback.project_id,
+        "task_id": feedback.task_id,
+        "artifact_receipt_id": feedback.artifact_receipt_id,
+        "source_type": feedback.source_type,
+        "customer_ref": feedback.customer_ref,
+        "summary": feedback.summary,
+        "sentiment": feedback.sentiment,
+        "evidence_refs": feedback.evidence_refs,
+        "action_required": feedback.action_required,
+        "operator_review_required": feedback.operator_review_required,
+        "status": feedback.status,
+        "created_at": feedback.created_at,
+    }
+
+
+def _project_revenue_attribution_payload(
+    attribution: Any,
+    *,
+    reconciliation_task_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "attribution_id": attribution.attribution_id,
+        "project_id": attribution.project_id,
+        "task_id": attribution.task_id,
+        "outcome_id": attribution.outcome_id,
+        "amount_usd": str(attribution.amount_usd),
+        "source": attribution.source,
+        "attribution_period": attribution.attribution_period,
+        "external_ref": attribution.external_ref,
+        "evidence_refs": attribution.evidence_refs,
+        "confidence": attribution.confidence,
+        "reconciliation_task_id": reconciliation_task_id,
+        "status": attribution.status,
+        "created_at": attribution.created_at,
+    }
+
+
+def _project_operator_load_payload(load: Any) -> dict[str, Any]:
+    return {
+        "load_id": load.load_id,
+        "project_id": load.project_id,
+        "task_id": load.task_id,
+        "outcome_id": load.outcome_id,
+        "minutes": load.minutes,
+        "load_type": load.load_type,
+        "source": load.source,
+        "notes": load.notes,
+        "created_at": load.created_at,
+    }
+
+
+def _project_phase_rollup_payload(phase: ProjectPhaseRollup) -> dict[str, Any]:
+    return {
+        "phase_name": phase.phase_name,
+        "task_counts": phase.task_counts,
+        "outcome_counts": phase.outcome_counts,
+        "artifact_count": phase.artifact_count,
+        "customer_feedback_count": phase.customer_feedback_count,
+        "revenue_attributed_usd": str(phase.revenue_attributed_usd),
+        "operator_load_minutes": phase.operator_load_minutes,
+        "status": phase.status,
+        "last_activity_at": phase.last_activity_at,
+    }
+
+
+def _project_status_rollup_payload(rollup: ProjectStatusRollup) -> dict[str, Any]:
+    return {
+        "rollup_id": rollup.rollup_id,
+        "project_id": rollup.project_id,
+        "project_status": rollup.project_status,
+        "phase_rollups": [_project_phase_rollup_payload(phase) for phase in rollup.phase_rollups],
+        "task_counts": rollup.task_counts,
+        "outcome_counts": rollup.outcome_counts,
+        "artifact_count": rollup.artifact_count,
+        "customer_feedback_count": rollup.customer_feedback_count,
+        "revenue_attributed_usd": str(rollup.revenue_attributed_usd),
+        "operator_load_minutes": rollup.operator_load_minutes,
+        "recommended_status": rollup.recommended_status,
+        "close_recommendation": rollup.close_recommendation,
+        "rationale": rollup.rationale,
+        "risk_flags": rollup.risk_flags,
+        "created_at": rollup.created_at,
+    }
+
+
+def _project_close_decision_packet_payload(packet: ProjectCloseDecisionPacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "project_id": packet.project_id,
+        "decision_id": packet.decision_id,
+        "rollup_id": packet.rollup_id,
+        "recommendation": packet.recommendation,
+        "required_authority": packet.required_authority,
+        "rationale": packet.rationale,
+        "risk_flags": packet.risk_flags,
+        "default_on_timeout": packet.default_on_timeout,
+        "status": packet.status,
+        "created_at": packet.created_at,
+    }
+
+
+def _project_replay_projection_comparison_payload(comparison: ProjectReplayProjectionComparison) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "project_id": comparison.project_id,
+        "replay_project_status": comparison.replay_project_status,
+        "projection_project_status": comparison.projection_project_status,
+        "replay_task_counts": comparison.replay_task_counts,
+        "projection_task_counts": comparison.projection_task_counts,
+        "replay_revenue_attributed_usd": str(comparison.replay_revenue_attributed_usd),
+        "projection_revenue_attributed_usd": str(comparison.projection_revenue_attributed_usd),
+        "replay_operator_load_minutes": comparison.replay_operator_load_minutes,
+        "projection_operator_load_minutes": comparison.projection_operator_load_minutes,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
+    }
+
+
+def _rollup_from_row(row: sqlite3.Row) -> ProjectStatusRollup:
+    phase_rollups = [
+        ProjectPhaseRollup(
+            phase_name=phase["phase_name"],
+            task_counts=phase["task_counts"],
+            outcome_counts=phase["outcome_counts"],
+            artifact_count=phase["artifact_count"],
+            customer_feedback_count=phase["customer_feedback_count"],
+            revenue_attributed_usd=Decimal(phase["revenue_attributed_usd"]),
+            operator_load_minutes=phase["operator_load_minutes"],
+            status=phase["status"],
+            last_activity_at=phase.get("last_activity_at"),
+        )
+        for phase in _loads(row["phase_rollups_json"])
+    ]
+    return ProjectStatusRollup(
+        rollup_id=row["rollup_id"],
+        project_id=row["project_id"],
+        project_status=row["project_status"],
+        phase_rollups=phase_rollups,
+        task_counts=_loads(row["task_counts_json"]),
+        outcome_counts=_loads(row["outcome_counts_json"]),
+        artifact_count=row["artifact_count"],
+        customer_feedback_count=row["customer_feedback_count"],
+        revenue_attributed_usd=Decimal(row["revenue_attributed_usd"]),
+        operator_load_minutes=row["operator_load_minutes"],
+        recommended_status=row["recommended_status"],
+        close_recommendation=row["close_recommendation"],
+        rationale=row["rationale"],
+        risk_flags=_loads(row["risk_flags_json"]),
+        created_at=row["created_at"],
+    )
+
+
+def _count_by_status(items: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        status = item.get("status")
+        if status is not None:
+            counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 def _model_task_class_payload(task_class: Any) -> dict[str, Any]:

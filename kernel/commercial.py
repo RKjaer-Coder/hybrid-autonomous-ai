@@ -2,7 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .records import Command, Decision, OpportunityProjectDecisionPacket, new_id
+from .records import (
+    Command,
+    Decision,
+    OpportunityProjectDecisionPacket,
+    Project,
+    ProjectArtifactReceipt,
+    ProjectCloseDecisionPacket,
+    ProjectCustomerFeedback,
+    ProjectOperatorLoadRecord,
+    ProjectOutcome,
+    ProjectReplayProjectionComparison,
+    ProjectRevenueAttribution,
+    ProjectStatusRollup,
+    ProjectTask,
+    new_id,
+)
 from .store import KERNEL_POLICY_VERSION, KernelStore
 
 
@@ -88,7 +103,8 @@ class KernelCommercialResearchWorkflow:
             "status": "gated",
         }
         project = {
-            "project_id": target,
+            "project_id": new_id(),
+            "decision_target": target,
             "name": title,
             "objective": f"Validate whether to turn this evidence into a bounded commercial project: {title}",
             "revenue_mechanism": revenue_mechanism,
@@ -177,6 +193,131 @@ class KernelCommercialResearchWorkflow:
         )
         return packet
 
+    def approve_g1_validation_project(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        operator_id: str = "operator",
+        notes: str | None = None,
+    ) -> dict[str, str]:
+        """Resolve a G1 packet and create the first bounded validation task."""
+        with self.store.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT packet_id, decision_id, evidence_bundle_id, project_json,
+                       evidence_used_json, gate_packet_json
+                FROM commercial_decision_packets
+                WHERE packet_id=?
+                """,
+                (packet_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("commercial decision packet not found")
+
+        project_spec = _loads(row["project_json"])
+        gate_packet = _loads(row["gate_packet_json"])
+        evidence_used = _loads(row["evidence_used_json"])
+        project = Project(
+            project_id=project_spec.get("project_id") or new_id(),
+            decision_packet_id=packet_id,
+            decision_id=row["decision_id"],
+            name=project_spec["name"],
+            objective=project_spec["objective"],
+            revenue_mechanism=project_spec["revenue_mechanism"],
+            operator_role=project_spec["operator_role"],
+            external_commitment_policy=project_spec["external_commitment_policy"],
+            budget_id=project_spec.get("budget_id"),
+            phases=project_spec["phases"],
+            success_metrics=project_spec["success_metrics"],
+            kill_criteria=project_spec["kill_criteria"],
+            evidence_refs=[f"kernel:evidence_bundles/{row['evidence_bundle_id']}"]
+            + [f"kernel:claims/{claim_id}" for claim_id in evidence_used],
+            status="active",
+        )
+        task = ProjectTask(
+            project_id=project.project_id,
+            phase_name="Validate",
+            task_type="validate",
+            autonomy_class="A2",
+            objective=project_spec["phases"][0]["objective"],
+            inputs={
+                "decision_packet_id": packet_id,
+                "decision_id": row["decision_id"],
+                "gate_packet": gate_packet,
+            },
+            expected_output_schema={
+                "type": "object",
+                "required": ["artifact_ref", "validation_result", "operator_load_actual", "next_recommendation"],
+            },
+            risk_level="medium",
+            required_capabilities=[
+                {
+                    "capability_type": "file",
+                    "actions": ["read", "write"],
+                    "scope": "project_workspace",
+                    "grant_required_before_run": True,
+                }
+            ],
+            model_requirement={
+                "task_class": "coding_small_patch",
+                "local_allowed_only_if_promoted": True,
+                "frontier_fallback_allowed_with_budget": False,
+            },
+            budget_id=project.budget_id,
+            authority_required="single_agent",
+            recovery_policy="ask_operator",
+            evidence_refs=project.evidence_refs,
+        )
+
+        def handler(tx):
+            tx.resolve_decision(
+                row["decision_id"],
+                verdict="approve_validation",
+                decided_by=operator_id,
+                notes=notes,
+                confidence=1.0,
+            )
+            tx.create_project(project)
+            tx.create_project_task(task)
+            return {"decision_id": row["decision_id"], "project_id": project.project_id, "task_id": task.task_id}
+
+        return self.store.execute_command(command, handler)
+
+    def record_project_outcome(self, command: Command, outcome: ProjectOutcome) -> str:
+        return self.store.record_project_outcome(command, outcome)
+
+    def record_project_artifact_receipt(self, command: Command, receipt: ProjectArtifactReceipt) -> str:
+        return self.store.record_project_artifact_receipt(command, receipt)
+
+    def record_project_customer_feedback(self, command: Command, feedback: ProjectCustomerFeedback) -> str:
+        return self.store.record_project_customer_feedback(command, feedback)
+
+    def record_project_revenue_attribution(self, command: Command, attribution: ProjectRevenueAttribution) -> str:
+        return self.store.record_project_revenue_attribution(command, attribution)
+
+    def record_project_operator_load(self, command: Command, load: ProjectOperatorLoadRecord) -> str:
+        return self.store.record_project_operator_load(command, load)
+
+    def derive_project_status_rollup(self, command: Command, project_id: str) -> ProjectStatusRollup:
+        return self.store.derive_project_status_rollup(command, project_id)
+
+    def create_project_close_decision(
+        self,
+        command: Command,
+        project_id: str,
+        *,
+        rollup_id: str | None = None,
+    ) -> ProjectCloseDecisionPacket:
+        return self.store.create_project_close_decision(command, project_id, rollup_id=rollup_id)
+
+    def compare_project_replay_to_projection(
+        self,
+        command: Command,
+        project_id: str,
+    ) -> ProjectReplayProjectionComparison:
+        return self.store.compare_project_replay_to_projection(command, project_id)
+
 
 def commercial_decision_packet_command(
     *,
@@ -194,6 +335,191 @@ def commercial_decision_packet_command(
         requested_authority="operator_gate",
         idempotency_key=key or f"commercial-decision-packet:{evidence_bundle_id}:{new_id()}",
         payload=payload or {"evidence_bundle_id": evidence_bundle_id},
+    )
+
+
+def g1_project_approval_command(
+    *,
+    packet_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.g1_project_approval",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=packet_id,
+        requested_authority="operator_gate",
+        idempotency_key=key or f"commercial-g1-approval:{packet_id}:{new_id()}",
+        payload=payload or {"packet_id": packet_id, "verdict": "approve_validation"},
+    )
+
+
+def project_task_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+    requested_by: str = "kernel",
+    requested_authority: str | None = None,
+) -> Command:
+    return Command(
+        command_type="commercial.project_task",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requester_id,
+        target_entity_type="task",
+        target_entity_id=project_id,
+        requested_authority=requested_authority,  # type: ignore[arg-type]
+        idempotency_key=key or f"commercial-project-task:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_outcome_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_outcome",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-outcome:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_artifact_receipt_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_artifact_receipt",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="artifact",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-artifact:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_feedback_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_feedback",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-feedback:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_revenue_attribution_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_revenue_attribution",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-revenue:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_operator_load_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "operator",
+) -> Command:
+    return Command(
+        command_type="commercial.project_operator_load",
+        requested_by="operator",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-load:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_status_rollup_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_status_rollup",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-rollup:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_close_decision_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_close_decision",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="decision",
+        target_entity_id=project_id,
+        requested_authority="operator_gate",
+        idempotency_key=key or f"commercial-project-close:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
+    )
+
+
+def project_replay_comparison_command(
+    *,
+    project_id: str,
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+    requester_id: str = "kernel",
+) -> Command:
+    return Command(
+        command_type="commercial.project_replay_comparison",
+        requested_by="kernel",
+        requester_id=requester_id,
+        target_entity_type="project",
+        target_entity_id=project_id,
+        idempotency_key=key or f"commercial-project-replay-compare:{project_id}:{new_id()}",
+        payload=payload or {"project_id": project_id},
     )
 
 
@@ -336,4 +662,14 @@ def _validation_cost_estimate(claims: list[dict[str, Any]]) -> dict[str, Any]:
 __all__ = [
     "KernelCommercialResearchWorkflow",
     "commercial_decision_packet_command",
+    "g1_project_approval_command",
+    "project_artifact_receipt_command",
+    "project_feedback_command",
+    "project_operator_load_command",
+    "project_outcome_command",
+    "project_close_decision_command",
+    "project_replay_comparison_command",
+    "project_revenue_attribution_command",
+    "project_status_rollup_command",
+    "project_task_command",
 ]

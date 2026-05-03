@@ -13,8 +13,11 @@ JsonObject = dict[str, Any]
 ActorType = Literal["kernel", "operator", "agent", "tool", "model", "scheduler"]
 Authority = Literal["rule", "single_agent", "council", "operator_gate"]
 DataClass = Literal["public", "internal", "sensitive", "secret_ref", "regulated", "client_confidential"]
+RiskLevel = Literal["low", "medium", "high", "critical"]
+AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
     "project_approval",
+    "project_close",
     "kill",
     "pivot",
     "spend",
@@ -30,6 +33,41 @@ DecisionType = Literal[
 DecisionStakes = Literal["low", "medium", "high", "critical"]
 DecisionRequester = Literal["operator", "kernel", "project", "research", "model_intelligence", "scheduler"]
 DecisionStatus = Literal["proposed", "deliberating", "decided", "gated", "expired", "cancelled"]
+ProjectStatus = Literal["proposed", "active", "paused", "blocked", "kill_recommended", "complete", "killed"]
+ProjectOperatorRole = Literal["sales", "reviewer", "client_owner", "none", "mixed"]
+ProjectCommitmentPolicy = Literal["operator_only", "preapproved_templates", "project_grants"]
+ProjectTaskStatus = Literal["queued", "running", "blocked", "completed", "failed", "cancelled"]
+ProjectTaskType = Literal["validate", "build", "ship", "operate", "feedback"]
+ProjectTaskAssignmentStatus = Literal["assigned", "accepted", "rejected", "revoked"]
+ProjectTaskWorkerType = Literal["agent", "operator", "tool", "model", "scheduler"]
+RecoveryPolicy = Literal[
+    "retry_same",
+    "retry_with_smaller_context",
+    "reroute_model",
+    "reroute_tool",
+    "degrade_output",
+    "ask_operator",
+    "fail_closed",
+]
+ProjectOutcomeType = Literal["validation", "build_artifact", "shipped_artifact", "feedback", "project_close"]
+ProjectOutcomeStatus = Literal["recorded", "accepted", "needs_followup"]
+ProjectArtifactKind = Literal["validation_artifact", "build_artifact", "shipped_artifact"]
+ProjectArtifactStatus = Literal["recorded", "accepted", "quarantined"]
+ProjectFeedbackSourceType = Literal["operator", "customer", "platform", "internal_signal"]
+ProjectFeedbackSentiment = Literal["positive", "neutral", "negative", "mixed", "unknown"]
+ProjectFeedbackStatus = Literal["recorded", "accepted", "needs_followup"]
+ProjectRevenueSource = Literal["operator_reported", "invoice", "stripe", "app_store", "marketplace", "platform", "other"]
+ProjectRevenueStatus = Literal["recorded", "reconciled", "needs_reconciliation"]
+ProjectOperatorLoadType = Literal[
+    "gate_review",
+    "client_sales",
+    "build_review",
+    "maintenance",
+    "reconciliation",
+    "other",
+]
+ProjectPhaseRollupStatus = Literal["not_started", "active", "blocked", "complete", "failed", "at_risk"]
+ProjectCloseRecommendation = Literal["continue", "complete", "kill", "pause"]
 ResearchProfile = Literal[
     "commercial",
     "ai_models",
@@ -364,6 +402,213 @@ class OpportunityProjectDecisionPacket:
     default_on_timeout: str
     status: Literal["proposed", "gated", "decided", "cancelled"] = "proposed"
     packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class Project:
+    name: str
+    objective: str
+    revenue_mechanism: CommercialRevenueMechanism
+    operator_role: ProjectOperatorRole
+    external_commitment_policy: ProjectCommitmentPolicy
+    phases: list[JsonObject]
+    success_metrics: list[str]
+    kill_criteria: list[str]
+    project_id: str = field(default_factory=new_id)
+    opportunity_id: str | None = None
+    decision_packet_id: str | None = None
+    decision_id: str | None = None
+    budget_id: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+    status: ProjectStatus = "proposed"
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectTask:
+    project_id: str
+    task_type: ProjectTaskType
+    autonomy_class: AutonomyClass
+    objective: str
+    inputs: JsonObject
+    risk_level: RiskLevel
+    required_capabilities: list[JsonObject]
+    model_requirement: JsonObject
+    authority_required: Authority
+    recovery_policy: RecoveryPolicy
+    task_id: str = field(default_factory=new_id)
+    phase_name: str | None = None
+    expected_output_schema: JsonObject | None = None
+    budget_id: str | None = None
+    deadline: str | None = None
+    status: ProjectTaskStatus = "queued"
+    command_id: str | None = None
+    policy_version: str | None = None
+    idempotency_key: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectTaskAssignment:
+    task_id: str
+    project_id: str
+    worker_type: ProjectTaskWorkerType
+    worker_id: str
+    grant_ids: list[str]
+    assignment_id: str = field(default_factory=new_id)
+    route_decision_id: str | None = None
+    accepted_capabilities: list[JsonObject] = field(default_factory=list)
+    status: ProjectTaskAssignmentStatus = "accepted"
+    notes: str | None = None
+    assigned_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectOutcome:
+    project_id: str
+    outcome_type: ProjectOutcomeType
+    summary: str
+    artifact_refs: list[str]
+    metrics: JsonObject
+    feedback: JsonObject
+    revenue_impact: JsonObject
+    outcome_id: str = field(default_factory=new_id)
+    task_id: str | None = None
+    phase_name: str | None = None
+    operator_load_actual: str | None = None
+    status: ProjectOutcomeStatus = "recorded"
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectArtifactReceipt:
+    project_id: str
+    artifact_ref: str
+    artifact_kind: ProjectArtifactKind
+    summary: str
+    data_class: DataClass
+    delivery_channel: str
+    receipt_id: str = field(default_factory=new_id)
+    task_id: str | None = None
+    side_effect_intent_id: str | None = None
+    side_effect_receipt_id: str | None = None
+    customer_visible: bool = False
+    status: ProjectArtifactStatus = "recorded"
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectCustomerFeedback:
+    project_id: str
+    source_type: ProjectFeedbackSourceType
+    summary: str
+    sentiment: ProjectFeedbackSentiment
+    feedback_id: str = field(default_factory=new_id)
+    task_id: str | None = None
+    artifact_receipt_id: str | None = None
+    customer_ref: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+    action_required: bool = False
+    operator_review_required: bool = True
+    status: ProjectFeedbackStatus = "recorded"
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectRevenueAttribution:
+    project_id: str
+    amount_usd: Decimal
+    source: ProjectRevenueSource
+    attribution_period: str
+    confidence: float
+    attribution_id: str = field(default_factory=new_id)
+    task_id: str | None = None
+    outcome_id: str | None = None
+    external_ref: str | None = None
+    evidence_refs: list[str] = field(default_factory=list)
+    reconciliation_task_id: str | None = None
+    status: ProjectRevenueStatus = "recorded"
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectOperatorLoadRecord:
+    project_id: str
+    minutes: int
+    load_type: ProjectOperatorLoadType
+    source: str
+    load_id: str = field(default_factory=new_id)
+    task_id: str | None = None
+    outcome_id: str | None = None
+    notes: str | None = None
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectPhaseRollup:
+    phase_name: str
+    task_counts: JsonObject
+    outcome_counts: JsonObject
+    artifact_count: int
+    customer_feedback_count: int
+    revenue_attributed_usd: Decimal
+    operator_load_minutes: int
+    status: ProjectPhaseRollupStatus
+    last_activity_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectStatusRollup:
+    project_id: str
+    project_status: ProjectStatus
+    phase_rollups: list[ProjectPhaseRollup]
+    task_counts: JsonObject
+    outcome_counts: JsonObject
+    artifact_count: int
+    customer_feedback_count: int
+    revenue_attributed_usd: Decimal
+    operator_load_minutes: int
+    recommended_status: ProjectStatus
+    close_recommendation: ProjectCloseRecommendation
+    rationale: str
+    risk_flags: list[str]
+    rollup_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectCloseDecisionPacket:
+    project_id: str
+    decision_id: str
+    rollup_id: str
+    recommendation: ProjectCloseRecommendation
+    required_authority: Authority
+    rationale: str
+    risk_flags: list[str]
+    default_on_timeout: str
+    status: Literal["gated", "decided", "cancelled"] = "gated"
+    packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ProjectReplayProjectionComparison:
+    project_id: str
+    replay_project_status: str | None
+    projection_project_status: str | None
+    replay_task_counts: JsonObject
+    projection_task_counts: JsonObject
+    replay_revenue_attributed_usd: Decimal
+    projection_revenue_attributed_usd: Decimal
+    replay_operator_load_minutes: int
+    projection_operator_load_minutes: int
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 

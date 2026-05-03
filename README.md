@@ -71,8 +71,9 @@ tests/               Unit and integration coverage
 
 ## Current Databases
 
-- `kernel.db`: v3.1 command/event, capability grant, budget, artifact, and
-  side-effect authority
+- `kernel.db`: v3.1 command/event, capability grant, budget, artifact,
+  side-effect, commercial project loop, phase/status rollup, close-decision,
+  and replay/projection comparison authority
 - `strategic_memory.db`: briefs, opportunities, research tasks, council outputs
 - `telemetry.db`: step outcomes, execution traces, harness variants, replay data
 - `immune_system.db`: immune verdicts, alerts, breakers, quarantine/fallback audit
@@ -101,6 +102,12 @@ Runtime launch paths fail closed on schema drift. `migrate.py --verify` checks
 table SQL semantics, including CHECK constraints and STRICT tables, and the
 runtime refuses to boot if any deployed database does not match the current
 schema contract.
+
+The commercial loop now has kernel-owned records for G1-approved projects,
+project tasks and assignments, outcomes, shipped artifact receipts, customer
+feedback, revenue attribution, operator-load records, derived phase/status
+rollups, operator-gated close decisions, and replay comparison against the
+commercial projection rows.
 
 Run the full test suite:
 

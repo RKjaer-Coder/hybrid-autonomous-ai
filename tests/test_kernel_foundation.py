@@ -280,7 +280,17 @@ class KernelFoundationTests(unittest.TestCase):
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
         self.assertIn("commands", tables)
-        self.assertNotIn("projects", tables)
+        self.assertIn("projects", tables)
+        self.assertIn("project_tasks", tables)
+        self.assertIn("project_task_assignments", tables)
+        self.assertIn("project_outcomes", tables)
+        self.assertIn("project_artifact_receipts", tables)
+        self.assertIn("project_customer_feedback", tables)
+        self.assertIn("project_revenue_attributions", tables)
+        self.assertIn("project_operator_load", tables)
+        self.assertIn("project_status_rollups", tables)
+        self.assertIn("project_close_decision_packets", tables)
+        self.assertIn("project_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):
