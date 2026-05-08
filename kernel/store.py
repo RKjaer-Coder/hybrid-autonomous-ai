@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .records import (
+    ArtifactGovernanceRecord,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -94,6 +95,7 @@ class ReplayState:
     grants: dict[str, dict[str, Any]] = field(default_factory=dict)
     side_effects: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_refs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    artifact_governance_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     research_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_acquisition_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -234,6 +236,12 @@ class KernelStore:
     def record_side_effect_receipt(self, command: Command, receipt: SideEffectReceipt) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.record_side_effect_receipt(receipt)
+
+        return self.execute_command(command, handler)
+
+    def record_artifact_governance(self, command: Command, record: ArtifactGovernanceRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_artifact_governance(record)
 
         return self.execute_command(command, handler)
 
@@ -900,6 +908,14 @@ class KernelStore:
             state.grants[entity_id]["used_count"] += 1
         elif event_type == "artifact_ref_created":
             state.artifact_refs[entity_id] = dict(payload)
+        elif event_type == "artifact_governance_recorded":
+            state.artifact_governance_records[entity_id] = dict(payload)
+            artifact = state.artifact_refs.get(payload["artifact_id"])
+            if artifact is not None and payload["status"] == "applied":
+                if payload["action"] == "quarantine":
+                    artifact["encryption_status"] = "quarantined"
+                elif payload["action"] in {"delete", "crypto_shred"}:
+                    artifact["encryption_status"] = "deleted"
         elif event_type == "research_request_created":
             state.research_requests[entity_id] = dict(payload)
         elif event_type == "research_request_transitioned":
@@ -1330,6 +1346,12 @@ class KernelTransaction:
         return reservation_id
 
     def create_artifact_ref(self, artifact: ArtifactRef) -> str:
+        if not artifact.artifact_uri.strip():
+            raise ValueError("artifact URI is required")
+        if not artifact.content_hash.strip():
+            raise ValueError("artifact content hash is required")
+        if artifact.data_class in {"sensitive", "secret_ref", "regulated", "client_confidential"} and artifact.encryption_status == "unencrypted":
+            raise PermissionError("sensitive artifact refs must not be recorded as unencrypted")
         payload = {
             "artifact_id": artifact.artifact_id,
             "artifact_uri": artifact.artifact_uri,
@@ -1363,6 +1385,71 @@ class KernelTransaction:
         )
         self.enqueue_projection(event_id, "artifact_projection")
         return artifact.artifact_id
+
+    def record_artifact_governance(self, record: ArtifactGovernanceRecord) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot record artifact governance outcomes")
+        if record.action not in {"retain", "quarantine", "redact", "delete", "crypto_shred"}:
+            raise ValueError("unknown artifact governance action")
+        if record.status not in {"recorded", "applied", "blocked"}:
+            raise ValueError("unknown artifact governance status")
+        if not record.reason.strip():
+            raise ValueError("artifact governance reason is required")
+        if not record.evidence_refs:
+            raise ValueError("artifact governance requires evidence references")
+        artifact = self.conn.execute(
+            """
+            SELECT artifact_id, data_class, deletion_policy, encryption_status
+            FROM artifact_refs
+            WHERE artifact_id=?
+            """,
+            (record.artifact_id,),
+        ).fetchone()
+        if artifact is None:
+            raise ValueError("artifact governance requires an existing artifact ref")
+        sensitive = artifact["data_class"] in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+        destructive = record.action in {"redact", "delete", "crypto_shred"}
+        if sensitive and destructive and (
+            self.command.requested_by != "operator"
+            or self.command.requested_authority != "operator_gate"
+            or record.required_authority != "operator_gate"
+        ):
+            raise PermissionError("sensitive artifact redaction or deletion requires operator-gate authority")
+        if record.action == "crypto_shred" and artifact["deletion_policy"] != "crypto-shred":
+            raise PermissionError("crypto-shred action requires a crypto-shred deletion policy")
+        if record.action in {"redact", "delete", "crypto_shred"} and (not record.receipt_ref or not record.receipt_hash):
+            raise ValueError("redaction and deletion actions require durable receipt references")
+        if artifact["encryption_status"] == "deleted" and record.action not in {"retain", "delete", "crypto_shred"}:
+            raise PermissionError("deleted artifact refs cannot receive non-retention governance actions")
+
+        payload = _artifact_governance_payload(record)
+        event_id = self.append_event("artifact_governance_recorded", "artifact", record.record_id, payload, artifact["data_class"])
+        self.conn.execute(
+            """
+            INSERT INTO artifact_governance_records (
+              record_id, artifact_id, action, reason, required_authority,
+              evidence_refs_json, receipt_ref, receipt_hash, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.record_id,
+                record.artifact_id,
+                record.action,
+                record.reason,
+                record.required_authority,
+                canonical_json(record.evidence_refs),
+                record.receipt_ref,
+                record.receipt_hash,
+                record.status,
+                record.created_at,
+            ),
+        )
+        if record.status == "applied" and record.action == "quarantine":
+            self.conn.execute("UPDATE artifact_refs SET encryption_status='quarantined' WHERE artifact_id=?", (record.artifact_id,))
+        elif record.status == "applied" and record.action in {"delete", "crypto_shred"}:
+            self.conn.execute("UPDATE artifact_refs SET encryption_status='deleted' WHERE artifact_id=?", (record.artifact_id,))
+        self.enqueue_projection(event_id, "artifact_governance_projection")
+        return record.record_id
 
     def create_research_request(self, request: ResearchRequest) -> str:
         if not request.question.strip():
@@ -6605,6 +6692,21 @@ def _source_payload(source: Any) -> dict[str, Any]:
         "artifact_ref": source.artifact_ref,
         "access_method": source.access_method,
         "data_class": source.data_class,
+    }
+
+
+def _artifact_governance_payload(record: Any) -> dict[str, Any]:
+    return {
+        "record_id": record.record_id,
+        "artifact_id": record.artifact_id,
+        "action": record.action,
+        "reason": record.reason,
+        "required_authority": record.required_authority,
+        "evidence_refs": record.evidence_refs,
+        "receipt_ref": record.receipt_ref,
+        "receipt_hash": record.receipt_hash,
+        "status": record.status,
+        "created_at": record.created_at,
     }
 
 

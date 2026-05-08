@@ -13,6 +13,8 @@ JsonObject = dict[str, Any]
 ActorType = Literal["kernel", "operator", "agent", "tool", "model", "scheduler"]
 Authority = Literal["rule", "single_agent", "council", "operator_gate"]
 DataClass = Literal["public", "internal", "sensitive", "secret_ref", "regulated", "client_confidential"]
+ArtifactGovernanceAction = Literal["retain", "quarantine", "redact", "delete", "crypto_shred"]
+ArtifactGovernanceStatus = Literal["recorded", "applied", "blocked"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -279,6 +281,20 @@ class ArtifactRef:
     encryption_status: Literal["unencrypted", "encrypted", "quarantined", "deleted"]
     source_notes: str | None = None
     artifact_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ArtifactGovernanceRecord:
+    artifact_id: str
+    action: ArtifactGovernanceAction
+    reason: str
+    required_authority: Authority
+    evidence_refs: list[str]
+    receipt_ref: str | None = None
+    receipt_hash: str | None = None
+    status: ArtifactGovernanceStatus = "applied"
+    record_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 

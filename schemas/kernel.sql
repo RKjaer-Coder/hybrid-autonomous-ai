@@ -778,6 +778,19 @@ CREATE TABLE IF NOT EXISTS artifact_refs (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS artifact_governance_records (
+  record_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifact_refs(artifact_id),
+  action TEXT NOT NULL CHECK (action IN ('retain','quarantine','redact','delete','crypto_shred')),
+  reason TEXT NOT NULL,
+  required_authority TEXT NOT NULL CHECK (required_authority IN ('rule','single_agent','council','operator_gate')),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  receipt_ref TEXT,
+  receipt_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('recorded','applied','blocked')),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS side_effect_intents (
   intent_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -879,6 +892,8 @@ CREATE INDEX IF NOT EXISTS idx_capability_grants_subject ON capability_grants(su
 CREATE INDEX IF NOT EXISTS idx_budgets_owner ON budgets(owner_type, owner_id, status);
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_budget_status ON budget_reservations(budget_id, status);
 CREATE INDEX IF NOT EXISTS idx_artifact_refs_data_class ON artifact_refs(data_class, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_governance_records_artifact ON artifact_governance_records(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_governance_records_action ON artifact_governance_records(action, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_side_effect_intents_status ON side_effect_intents(status, side_effect_type);
 CREATE INDEX IF NOT EXISTS idx_side_effect_receipts_intent ON side_effect_receipts(intent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_projection_outbox_status ON projection_outbox(status, created_at);
