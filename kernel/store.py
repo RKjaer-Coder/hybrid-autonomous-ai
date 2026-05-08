@@ -8,6 +8,9 @@ from typing import Any, Callable
 
 from .records import (
     ArtifactGovernanceRecord,
+    ArtifactLifecycleReplayProjectionComparison,
+    ArtifactLifecycleTaskPacket,
+    ArtifactPayloadMetadata,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -96,6 +99,9 @@ class ReplayState:
     side_effects: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_refs: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_governance_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    artifact_payload_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+    artifact_lifecycle_task_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    artifact_lifecycle_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     research_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_acquisition_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -242,6 +248,49 @@ class KernelStore:
     def record_artifact_governance(self, command: Command, record: ArtifactGovernanceRecord) -> str:
         def handler(tx: KernelTransaction) -> str:
             return tx.record_artifact_governance(record)
+
+        return self.execute_command(command, handler)
+
+    def record_artifact_payload_metadata(self, command: Command, metadata: ArtifactPayloadMetadata) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_artifact_payload_metadata(metadata)
+
+        return self.execute_command(command, handler)
+
+    def scan_artifact_retention_due(self, command: Command, as_of: str) -> list[ArtifactLifecycleTaskPacket]:
+        def handler(tx: KernelTransaction) -> list[ArtifactLifecycleTaskPacket]:
+            return tx.scan_artifact_retention_due(as_of)
+
+        return self.execute_command(command, handler)
+
+    def complete_artifact_lifecycle_task(
+        self,
+        command: Command,
+        packet_id: str,
+        *,
+        receipt_ref: str,
+        receipt_hash: str,
+        status: str = "completed",
+        reason: str | None = None,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.complete_artifact_lifecycle_task(
+                packet_id,
+                receipt_ref=receipt_ref,
+                receipt_hash=receipt_hash,
+                status=status,
+                reason=reason,
+            )
+
+        return self.execute_command(command, handler)
+
+    def compare_artifact_lifecycle_replay_to_projection(
+        self,
+        command: Command,
+        artifact_id: str,
+    ) -> ArtifactLifecycleReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> ArtifactLifecycleReplayProjectionComparison:
+            return tx.compare_artifact_lifecycle_replay_to_projection(artifact_id)
 
         return self.execute_command(command, handler)
 
@@ -916,6 +965,34 @@ class KernelStore:
                     artifact["encryption_status"] = "quarantined"
                 elif payload["action"] in {"delete", "crypto_shred"}:
                     artifact["encryption_status"] = "deleted"
+        elif event_type == "artifact_payload_metadata_recorded":
+            state.artifact_payload_metadata[entity_id] = dict(payload)
+        elif event_type == "artifact_lifecycle_task_packet_created":
+            state.artifact_lifecycle_task_packets[entity_id] = dict(payload)
+            metadata = state.artifact_payload_metadata.get(payload["metadata_id"])
+            if metadata is not None and payload["action"] in {"delete", "crypto_shred"}:
+                metadata["status"] = "deletion_due"
+                metadata["updated_at"] = payload["created_at"]
+        elif event_type == "artifact_lifecycle_task_completed":
+            packet = state.artifact_lifecycle_task_packets[entity_id]
+            packet["status"] = payload["status"]
+            packet["receipt_ref"] = payload["receipt_ref"]
+            packet["receipt_hash"] = payload["receipt_hash"]
+            packet["completed_at"] = payload["completed_at"]
+            metadata = state.artifact_payload_metadata.get(payload["metadata_id"])
+            if metadata is not None and payload["status"] == "completed":
+                if payload["action"] == "quarantine":
+                    metadata["status"] = "quarantined"
+                    metadata["encryption_status"] = "quarantined"
+                elif payload["action"] == "delete":
+                    metadata["status"] = "deleted"
+                    metadata["encryption_status"] = "deleted"
+                elif payload["action"] == "crypto_shred":
+                    metadata["status"] = "crypto_shredded"
+                    metadata["encryption_status"] = "deleted"
+                metadata["updated_at"] = payload["completed_at"]
+        elif event_type == "artifact_lifecycle_replay_projection_compared":
+            state.artifact_lifecycle_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "research_request_created":
             state.research_requests[entity_id] = dict(payload)
         elif event_type == "research_request_transitioned":
@@ -1450,6 +1527,356 @@ class KernelTransaction:
             self.conn.execute("UPDATE artifact_refs SET encryption_status='deleted' WHERE artifact_id=?", (record.artifact_id,))
         self.enqueue_projection(event_id, "artifact_governance_projection")
         return record.record_id
+
+    def record_artifact_payload_metadata(self, metadata: ArtifactPayloadMetadata) -> str:
+        artifact = self.conn.execute(
+            """
+            SELECT artifact_id, data_class, content_hash, retention_policy,
+                   deletion_policy, encryption_status
+            FROM artifact_refs
+            WHERE artifact_id=?
+            """,
+            (metadata.artifact_id,),
+        ).fetchone()
+        if artifact is None:
+            raise ValueError("artifact payload metadata requires an existing artifact ref")
+        if not metadata.payload_uri.strip():
+            raise ValueError("artifact payload URI is required")
+        if metadata.size_bytes < 0:
+            raise ValueError("artifact payload size must be non-negative")
+        if metadata.data_class != artifact["data_class"]:
+            raise ValueError("artifact payload data class must match ArtifactRef")
+        if metadata.content_hash != artifact["content_hash"]:
+            raise ValueError("artifact payload content hash must match ArtifactRef")
+        if metadata.retention_policy != artifact["retention_policy"]:
+            raise ValueError("artifact payload retention policy must match ArtifactRef")
+        if metadata.deletion_policy != artifact["deletion_policy"]:
+            raise ValueError("artifact payload deletion policy must match ArtifactRef")
+        sensitive = metadata.data_class in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+        if sensitive and metadata.encryption_status == "unencrypted":
+            raise PermissionError("sensitive artifact payloads must be encrypted")
+        if metadata.encryption_status == "encrypted" and not metadata.encryption_key_ref:
+            raise ValueError("encrypted artifact payloads require an encryption key reference")
+        payload = _artifact_payload_metadata_payload(metadata)
+        event_id = self.append_event(
+            "artifact_payload_metadata_recorded",
+            "artifact",
+            metadata.metadata_id,
+            payload,
+            metadata.data_class,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO artifact_payload_metadata (
+              metadata_id, artifact_id, payload_uri, storage_backend, data_class,
+              content_hash, payload_hash, size_bytes, retention_policy,
+              retention_due_at, deletion_policy, encryption_status,
+              encryption_key_ref, access_policy_json, legal_hold, status,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                metadata.metadata_id,
+                metadata.artifact_id,
+                metadata.payload_uri,
+                metadata.storage_backend,
+                metadata.data_class,
+                metadata.content_hash,
+                metadata.payload_hash,
+                metadata.size_bytes,
+                metadata.retention_policy,
+                metadata.retention_due_at,
+                metadata.deletion_policy,
+                metadata.encryption_status,
+                metadata.encryption_key_ref,
+                canonical_json(metadata.access_policy),
+                1 if metadata.legal_hold else 0,
+                metadata.status,
+                metadata.created_at,
+                metadata.updated_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "artifact_payload_metadata_projection")
+        return metadata.metadata_id
+
+    def scan_artifact_retention_due(self, as_of: str) -> list[ArtifactLifecycleTaskPacket]:
+        if self.command.requested_by not in {"operator", "kernel", "scheduler"}:
+            raise PermissionError("artifact retention scans are kernel-owned")
+        rows = self.conn.execute(
+            """
+            SELECT m.*, a.encryption_status AS artifact_encryption_status
+            FROM artifact_payload_metadata m
+            JOIN artifact_refs a ON a.artifact_id = m.artifact_id
+            WHERE m.retention_due_at <= ?
+              AND m.legal_hold = 0
+              AND m.status IN ('active','quarantined','deletion_due')
+              AND NOT EXISTS (
+                SELECT 1
+                FROM artifact_lifecycle_task_packets p
+                WHERE p.metadata_id = m.metadata_id
+                  AND p.status = 'queued'
+              )
+            ORDER BY m.retention_due_at, m.metadata_id
+            """,
+            (as_of,),
+        ).fetchall()
+        packets: list[ArtifactLifecycleTaskPacket] = []
+        for row in rows:
+            data_class = row["data_class"]
+            sensitive = data_class in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+            if sensitive and row["status"] == "active":
+                action = "quarantine"
+                required_authority = "rule"
+                reason = "Retention due scan quarantined sensitive artifact payload before deletion."
+            else:
+                action = "crypto_shred" if row["deletion_policy"] == "crypto-shred" else "delete"
+                required_authority = "operator_gate" if sensitive else "rule"
+                reason = "Retention period ended; artifact payload requires governed lifecycle completion."
+            packet = ArtifactLifecycleTaskPacket(
+                artifact_id=row["artifact_id"],
+                metadata_id=row["metadata_id"],
+                action=action,  # type: ignore[arg-type]
+                reason=reason,
+                due_at=as_of,
+                required_authority=required_authority,  # type: ignore[arg-type]
+                evidence_refs=[
+                    f"kernel:artifact_refs/{row['artifact_id']}",
+                    f"kernel:artifact_payload_metadata/{row['metadata_id']}",
+                ],
+            )
+            payload = _artifact_lifecycle_task_packet_payload(packet)
+            event_id = self.append_event(
+                "artifact_lifecycle_task_packet_created",
+                "artifact",
+                packet.packet_id,
+                payload,
+                data_class,
+            )
+            self.conn.execute(
+                """
+                INSERT INTO artifact_lifecycle_task_packets (
+                  packet_id, artifact_id, metadata_id, action, reason, due_at,
+                  required_authority, evidence_refs_json, receipt_required,
+                  receipt_ref, receipt_hash, status, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    packet.packet_id,
+                    packet.artifact_id,
+                    packet.metadata_id,
+                    packet.action,
+                    packet.reason,
+                    packet.due_at,
+                    packet.required_authority,
+                    canonical_json(packet.evidence_refs),
+                    1 if packet.receipt_required else 0,
+                    packet.receipt_ref,
+                    packet.receipt_hash,
+                    packet.status,
+                    packet.created_at,
+                    packet.completed_at,
+                ),
+            )
+            if action in {"delete", "crypto_shred"}:
+                self.conn.execute(
+                    "UPDATE artifact_payload_metadata SET status='deletion_due', updated_at=? WHERE metadata_id=?",
+                    (packet.created_at, packet.metadata_id),
+                )
+            self.enqueue_projection(event_id, "artifact_lifecycle_task_packet_projection")
+            packets.append(packet)
+        return packets
+
+    def complete_artifact_lifecycle_task(
+        self,
+        packet_id: str,
+        *,
+        receipt_ref: str,
+        receipt_hash: str,
+        status: str = "completed",
+        reason: str | None = None,
+    ) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot complete artifact lifecycle task packets")
+        if status not in {"completed", "blocked"}:
+            raise ValueError("artifact lifecycle completion status must be completed or blocked")
+        if not receipt_ref.strip() or not receipt_hash.strip():
+            raise ValueError("artifact lifecycle completion requires durable receipt references")
+        row = self.conn.execute(
+            """
+            SELECT p.*, m.data_class, m.deletion_policy
+            FROM artifact_lifecycle_task_packets p
+            JOIN artifact_payload_metadata m ON m.metadata_id = p.metadata_id
+            WHERE p.packet_id=?
+            """,
+            (packet_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("artifact lifecycle task packet not found")
+        if row["status"] != "queued":
+            raise ValueError(f"cannot complete artifact lifecycle task from status {row['status']}")
+        sensitive = row["data_class"] in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+        destructive = row["action"] in {"delete", "crypto_shred"}
+        if sensitive and destructive and (
+            self.command.requested_by != "operator"
+            or self.command.requested_authority != "operator_gate"
+            or row["required_authority"] != "operator_gate"
+        ):
+            raise PermissionError("sensitive artifact payload deletion requires operator-gate authority")
+        if row["action"] == "crypto_shred" and row["deletion_policy"] != "crypto-shred":
+            raise PermissionError("crypto-shred lifecycle task requires a crypto-shred deletion policy")
+        completed_at = now_iso()
+        completion_payload = {
+            "packet_id": packet_id,
+            "artifact_id": row["artifact_id"],
+            "metadata_id": row["metadata_id"],
+            "action": row["action"],
+            "status": status,
+            "reason": reason or row["reason"],
+            "receipt_ref": receipt_ref,
+            "receipt_hash": receipt_hash,
+            "completed_at": completed_at,
+        }
+        event_id = self.append_event(
+            "artifact_lifecycle_task_completed",
+            "artifact",
+            packet_id,
+            completion_payload,
+            row["data_class"],
+        )
+        self.conn.execute(
+            """
+            UPDATE artifact_lifecycle_task_packets
+            SET status=?, receipt_ref=?, receipt_hash=?, completed_at=?
+            WHERE packet_id=?
+            """,
+            (status, receipt_ref, receipt_hash, completed_at, packet_id),
+        )
+        if status == "completed":
+            if row["action"] == "quarantine":
+                metadata_status = "quarantined"
+                encryption_status = "quarantined"
+            elif row["action"] == "delete":
+                metadata_status = "deleted"
+                encryption_status = "deleted"
+            else:
+                metadata_status = "crypto_shredded"
+                encryption_status = "deleted"
+            self.conn.execute(
+                """
+                UPDATE artifact_payload_metadata
+                SET status=?, encryption_status=?, updated_at=?
+                WHERE metadata_id=?
+                """,
+                (metadata_status, encryption_status, completed_at, row["metadata_id"]),
+            )
+            governance = ArtifactGovernanceRecord(
+                artifact_id=row["artifact_id"],
+                action=row["action"],
+                reason=reason or row["reason"],
+                required_authority=row["required_authority"],
+                evidence_refs=[
+                    *_loads(row["evidence_refs_json"]),
+                    f"kernel:artifact_lifecycle_task_packets/{packet_id}",
+                ],
+                receipt_ref=receipt_ref,
+                receipt_hash=receipt_hash,
+                status="applied",
+                created_at=completed_at,
+            )
+            self.record_artifact_governance(governance)
+        self.enqueue_projection(event_id, "artifact_lifecycle_task_packet_projection")
+        return packet_id
+
+    def compare_artifact_lifecycle_replay_to_projection(
+        self,
+        artifact_id: str,
+    ) -> ArtifactLifecycleReplayProjectionComparison:
+        projection_artifact = self.conn.execute(
+            "SELECT * FROM artifact_refs WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()
+        if projection_artifact is None:
+            raise ValueError("artifact ref not found")
+        replay = KernelStore._replay_from_connection(self.conn)
+        replay_artifact_state = replay.artifact_refs.get(artifact_id, {})
+        projection_artifact_state = _artifact_ref_row_payload(projection_artifact)
+        projection_metadata_rows = self.conn.execute(
+            "SELECT * FROM artifact_payload_metadata WHERE artifact_id=? ORDER BY metadata_id",
+            (artifact_id,),
+        ).fetchall()
+        projection_packet_rows = self.conn.execute(
+            "SELECT * FROM artifact_lifecycle_task_packets WHERE artifact_id=? ORDER BY packet_id",
+            (artifact_id,),
+        ).fetchall()
+        replay_payload_metadata = sorted(
+            (
+                dict(value)
+                for value in replay.artifact_payload_metadata.values()
+                if value["artifact_id"] == artifact_id
+            ),
+            key=lambda item: item["metadata_id"],
+        )
+        projection_payload_metadata = [_artifact_payload_metadata_row_payload(row) for row in projection_metadata_rows]
+        replay_task_packets = sorted(
+            (
+                dict(value)
+                for value in replay.artifact_lifecycle_task_packets.values()
+                if value["artifact_id"] == artifact_id
+            ),
+            key=lambda item: item["packet_id"],
+        )
+        projection_task_packets = [_artifact_lifecycle_task_packet_row_payload(row) for row in projection_packet_rows]
+        mismatches: list[str] = []
+        if replay_artifact_state != projection_artifact_state:
+            mismatches.append("artifact_ref_state")
+        if replay_payload_metadata != projection_payload_metadata:
+            mismatches.append("artifact_payload_metadata")
+        if replay_task_packets != projection_task_packets:
+            mismatches.append("artifact_lifecycle_task_packets")
+        comparison = ArtifactLifecycleReplayProjectionComparison(
+            artifact_id=artifact_id,
+            replay_artifact_state=replay_artifact_state,
+            projection_artifact_state=projection_artifact_state,
+            replay_payload_metadata=replay_payload_metadata,
+            projection_payload_metadata=projection_payload_metadata,
+            replay_task_packets=replay_task_packets,
+            projection_task_packets=projection_task_packets,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _artifact_lifecycle_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event(
+            "artifact_lifecycle_replay_projection_compared",
+            "artifact",
+            comparison.comparison_id,
+            payload,
+            projection_artifact["data_class"],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO artifact_lifecycle_replay_projection_comparisons (
+              comparison_id, artifact_id, replay_artifact_state_json,
+              projection_artifact_state_json, replay_payload_metadata_json,
+              projection_payload_metadata_json, replay_task_packets_json,
+              projection_task_packets_json, matches, mismatches_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.artifact_id,
+                canonical_json(comparison.replay_artifact_state),
+                canonical_json(comparison.projection_artifact_state),
+                canonical_json(comparison.replay_payload_metadata),
+                canonical_json(comparison.projection_payload_metadata),
+                canonical_json(comparison.replay_task_packets),
+                canonical_json(comparison.projection_task_packets),
+                1 if comparison.matches else 0,
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "artifact_lifecycle_replay_projection_comparison_projection")
+        return comparison
 
     def create_research_request(self, request: ResearchRequest) -> str:
         if not request.question.strip():
@@ -6707,6 +7134,122 @@ def _artifact_governance_payload(record: Any) -> dict[str, Any]:
         "receipt_hash": record.receipt_hash,
         "status": record.status,
         "created_at": record.created_at,
+    }
+
+
+def _artifact_payload_metadata_payload(metadata: ArtifactPayloadMetadata) -> dict[str, Any]:
+    return {
+        "metadata_id": metadata.metadata_id,
+        "artifact_id": metadata.artifact_id,
+        "payload_uri": metadata.payload_uri,
+        "storage_backend": metadata.storage_backend,
+        "data_class": metadata.data_class,
+        "content_hash": metadata.content_hash,
+        "payload_hash": metadata.payload_hash,
+        "size_bytes": metadata.size_bytes,
+        "retention_policy": metadata.retention_policy,
+        "retention_due_at": metadata.retention_due_at,
+        "deletion_policy": metadata.deletion_policy,
+        "encryption_status": metadata.encryption_status,
+        "encryption_key_ref": metadata.encryption_key_ref,
+        "access_policy": metadata.access_policy,
+        "legal_hold": metadata.legal_hold,
+        "status": metadata.status,
+        "created_at": metadata.created_at,
+        "updated_at": metadata.updated_at,
+    }
+
+
+def _artifact_lifecycle_task_packet_payload(packet: ArtifactLifecycleTaskPacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "artifact_id": packet.artifact_id,
+        "metadata_id": packet.metadata_id,
+        "action": packet.action,
+        "reason": packet.reason,
+        "due_at": packet.due_at,
+        "required_authority": packet.required_authority,
+        "evidence_refs": packet.evidence_refs,
+        "receipt_required": packet.receipt_required,
+        "receipt_ref": packet.receipt_ref,
+        "receipt_hash": packet.receipt_hash,
+        "status": packet.status,
+        "created_at": packet.created_at,
+        "completed_at": packet.completed_at,
+    }
+
+
+def _artifact_ref_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "artifact_id": row["artifact_id"],
+        "artifact_uri": row["artifact_uri"],
+        "data_class": row["data_class"],
+        "content_hash": row["content_hash"],
+        "retention_policy": row["retention_policy"],
+        "deletion_policy": row["deletion_policy"],
+        "encryption_status": row["encryption_status"],
+        "source_notes": row["source_notes"],
+        "created_at": row["created_at"],
+    }
+
+
+def _artifact_payload_metadata_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "metadata_id": row["metadata_id"],
+        "artifact_id": row["artifact_id"],
+        "payload_uri": row["payload_uri"],
+        "storage_backend": row["storage_backend"],
+        "data_class": row["data_class"],
+        "content_hash": row["content_hash"],
+        "payload_hash": row["payload_hash"],
+        "size_bytes": row["size_bytes"],
+        "retention_policy": row["retention_policy"],
+        "retention_due_at": row["retention_due_at"],
+        "deletion_policy": row["deletion_policy"],
+        "encryption_status": row["encryption_status"],
+        "encryption_key_ref": row["encryption_key_ref"],
+        "access_policy": _loads(row["access_policy_json"]),
+        "legal_hold": bool(row["legal_hold"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _artifact_lifecycle_task_packet_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "packet_id": row["packet_id"],
+        "artifact_id": row["artifact_id"],
+        "metadata_id": row["metadata_id"],
+        "action": row["action"],
+        "reason": row["reason"],
+        "due_at": row["due_at"],
+        "required_authority": row["required_authority"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "receipt_required": bool(row["receipt_required"]),
+        "receipt_ref": row["receipt_ref"],
+        "receipt_hash": row["receipt_hash"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _artifact_lifecycle_replay_projection_comparison_payload(
+    comparison: ArtifactLifecycleReplayProjectionComparison,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "artifact_id": comparison.artifact_id,
+        "replay_artifact_state": comparison.replay_artifact_state,
+        "projection_artifact_state": comparison.projection_artifact_state,
+        "replay_payload_metadata": comparison.replay_payload_metadata,
+        "projection_payload_metadata": comparison.projection_payload_metadata,
+        "replay_task_packets": comparison.replay_task_packets,
+        "projection_task_packets": comparison.projection_task_packets,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
     }
 
 

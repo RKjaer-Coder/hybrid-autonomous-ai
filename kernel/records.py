@@ -15,6 +15,9 @@ Authority = Literal["rule", "single_agent", "council", "operator_gate"]
 DataClass = Literal["public", "internal", "sensitive", "secret_ref", "regulated", "client_confidential"]
 ArtifactGovernanceAction = Literal["retain", "quarantine", "redact", "delete", "crypto_shred"]
 ArtifactGovernanceStatus = Literal["recorded", "applied", "blocked"]
+ArtifactPayloadStatus = Literal["active", "quarantined", "deletion_due", "deleted", "crypto_shredded"]
+ArtifactLifecycleTaskAction = Literal["quarantine", "delete", "crypto_shred"]
+ArtifactLifecycleTaskStatus = Literal["queued", "completed", "blocked"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -295,6 +298,61 @@ class ArtifactGovernanceRecord:
     receipt_hash: str | None = None
     status: ArtifactGovernanceStatus = "applied"
     record_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ArtifactPayloadMetadata:
+    artifact_id: str
+    payload_uri: str
+    storage_backend: str
+    data_class: DataClass
+    content_hash: str
+    payload_hash: str
+    size_bytes: int
+    retention_policy: str
+    retention_due_at: str
+    deletion_policy: str
+    encryption_status: Literal["unencrypted", "encrypted", "quarantined", "deleted"]
+    encryption_key_ref: str | None
+    access_policy: JsonObject
+    legal_hold: bool = False
+    status: ArtifactPayloadStatus = "active"
+    metadata_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class ArtifactLifecycleTaskPacket:
+    artifact_id: str
+    metadata_id: str
+    action: ArtifactLifecycleTaskAction
+    reason: str
+    due_at: str
+    required_authority: Authority
+    evidence_refs: list[str]
+    receipt_required: bool = True
+    receipt_ref: str | None = None
+    receipt_hash: str | None = None
+    status: ArtifactLifecycleTaskStatus = "queued"
+    packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+    completed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactLifecycleReplayProjectionComparison:
+    artifact_id: str
+    replay_artifact_state: JsonObject
+    projection_artifact_state: JsonObject
+    replay_payload_metadata: list[JsonObject]
+    projection_payload_metadata: list[JsonObject]
+    replay_task_packets: list[JsonObject]
+    projection_task_packets: list[JsonObject]
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 

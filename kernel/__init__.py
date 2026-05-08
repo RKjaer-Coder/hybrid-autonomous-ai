@@ -6,6 +6,9 @@ the first v3.1 authoritative command/event/capability/budget/side-effect spine.
 
 from .records import (
     ArtifactGovernanceRecord,
+    ArtifactLifecycleReplayProjectionComparison,
+    ArtifactLifecycleTaskPacket,
+    ArtifactPayloadMetadata,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -138,6 +141,9 @@ from .runtime import (
 __all__ = [
     "ArtifactRef",
     "ArtifactGovernanceRecord",
+    "ArtifactPayloadMetadata",
+    "ArtifactLifecycleTaskPacket",
+    "ArtifactLifecycleReplayProjectionComparison",
     "Budget",
     "CapabilityGrant",
     "ClaimRecord",

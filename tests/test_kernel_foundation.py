@@ -8,6 +8,7 @@ from pathlib import Path
 
 from kernel import (
     ArtifactGovernanceRecord,
+    ArtifactPayloadMetadata,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -359,6 +360,212 @@ class KernelFoundationTests(unittest.TestCase):
                 missing_receipt,
             )
 
+    def test_artifact_payload_retention_scan_and_receipt_required_crypto_shred(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/payload-client-dossier",
+            data_class="client_confidential",
+            content_hash=sha256_text("payload content"),
+            retention_policy="retain-until-2026-05-01",
+            deletion_policy="crypto-shred",
+            encryption_status="encrypted",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "payload-lifecycle-artifact"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        metadata = ArtifactPayloadMetadata(
+            artifact_id=artifact_id,
+            payload_uri="artifact://local/payload-client-dossier/blob",
+            storage_backend="local_encrypted_store",
+            data_class="client_confidential",
+            content_hash=artifact.content_hash,
+            payload_hash=payload_hash({"blob": "payload content"}),
+            size_bytes=128,
+            retention_policy=artifact.retention_policy,
+            retention_due_at="2026-05-01T00:00:00Z",
+            deletion_policy=artifact.deletion_policy,
+            encryption_status="encrypted",
+            encryption_key_ref="kms://local/client-dossier/key",
+            access_policy={"read": ["kernel"], "external_side_effects": False},
+        )
+        metadata_id = self.store.record_artifact_payload_metadata(
+            command("artifact.payload", "payload-lifecycle-metadata"),
+            metadata,
+        )
+
+        packets = self.store.scan_artifact_retention_due(
+            command("artifact.retention_scan", "payload-lifecycle-scan", requested_by="scheduler"),
+            "2026-05-09T00:00:00Z",
+        )
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0].action, "quarantine")
+        self.assertEqual(packets[0].required_authority, "rule")
+        self.assertEqual(
+            self.store.scan_artifact_retention_due(
+                command("artifact.retention_scan", "payload-lifecycle-scan-idempotent", requested_by="scheduler"),
+                "2026-05-09T00:00:00Z",
+            ),
+            [],
+        )
+
+        with self.assertRaises(ValueError):
+            self.store.complete_artifact_lifecycle_task(
+                command("artifact.lifecycle_complete", "payload-lifecycle-missing-receipt"),
+                packets[0].packet_id,
+                receipt_ref="",
+                receipt_hash="",
+            )
+        self.store.complete_artifact_lifecycle_task(
+            command("artifact.lifecycle_complete", "payload-lifecycle-quarantine"),
+            packets[0].packet_id,
+            receipt_ref="artifact://local/payload-client-dossier/quarantine-receipt",
+            receipt_hash=sha256_text("quarantined"),
+        )
+        delete_packets = self.store.scan_artifact_retention_due(
+            command("artifact.retention_scan", "payload-lifecycle-delete-scan", requested_by="scheduler"),
+            "2026-05-10T00:00:00Z",
+        )
+        self.assertEqual(len(delete_packets), 1)
+        self.assertEqual(delete_packets[0].action, "crypto_shred")
+        self.assertEqual(delete_packets[0].required_authority, "operator_gate")
+        with self.assertRaises(PermissionError):
+            self.store.complete_artifact_lifecycle_task(
+                command("artifact.lifecycle_complete", "payload-lifecycle-worker-delete", requested_by="scheduler"),
+                delete_packets[0].packet_id,
+                receipt_ref="kms://local/client-dossier/key/shred-receipt",
+                receipt_hash=sha256_text("key destroyed"),
+            )
+        self.store.complete_artifact_lifecycle_task(
+            command(
+                "artifact.lifecycle_complete",
+                "payload-lifecycle-crypto-shred",
+                requested_authority="operator_gate",
+            ),
+            delete_packets[0].packet_id,
+            receipt_ref="kms://local/client-dossier/key/shred-receipt",
+            receipt_hash=sha256_text("key destroyed"),
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.artifact_refs[artifact_id]["encryption_status"], "deleted")
+        self.assertEqual(replay.artifact_payload_metadata[metadata_id]["status"], "crypto_shredded")
+        self.assertEqual(
+            replay.artifact_lifecycle_task_packets[delete_packets[0].packet_id]["receipt_hash"],
+            sha256_text("key destroyed"),
+        )
+
+    def test_artifact_payload_metadata_fails_closed_for_unencrypted_sensitive_payloads_and_legal_hold(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/legal-hold-secret",
+            data_class="secret_ref",
+            content_hash=sha256_text("secret payload"),
+            retention_policy="retain-until-2026-05-01",
+            deletion_policy="crypto-shred",
+            encryption_status="encrypted",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "legal-hold-artifact"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.record_artifact_payload_metadata(
+                command("artifact.payload", "legal-hold-unencrypted"),
+                ArtifactPayloadMetadata(
+                    artifact_id=artifact_id,
+                    payload_uri="artifact://local/legal-hold-secret/blob",
+                    storage_backend="local_store",
+                    data_class="secret_ref",
+                    content_hash=artifact.content_hash,
+                    payload_hash=payload_hash({"blob": "secret"}),
+                    size_bytes=12,
+                    retention_policy=artifact.retention_policy,
+                    retention_due_at="2026-05-01T00:00:00Z",
+                    deletion_policy=artifact.deletion_policy,
+                    encryption_status="unencrypted",
+                    encryption_key_ref=None,
+                    access_policy={"read": ["kernel"]},
+                ),
+            )
+        metadata = ArtifactPayloadMetadata(
+            artifact_id=artifact_id,
+            payload_uri="artifact://local/legal-hold-secret/blob",
+            storage_backend="local_encrypted_store",
+            data_class="secret_ref",
+            content_hash=artifact.content_hash,
+            payload_hash=payload_hash({"blob": "secret"}),
+            size_bytes=12,
+            retention_policy=artifact.retention_policy,
+            retention_due_at="2026-05-01T00:00:00Z",
+            deletion_policy=artifact.deletion_policy,
+            encryption_status="encrypted",
+            encryption_key_ref="kms://local/legal-hold/key",
+            access_policy={"read": ["kernel"]},
+            legal_hold=True,
+        )
+        self.store.record_artifact_payload_metadata(command("artifact.payload", "legal-hold-metadata"), metadata)
+        packets = self.store.scan_artifact_retention_due(
+            command("artifact.retention_scan", "legal-hold-scan", requested_by="kernel"),
+            "2026-05-09T00:00:00Z",
+        )
+        self.assertEqual(packets, [])
+
+    def test_artifact_lifecycle_replay_projection_comparison_detects_drift(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/replay-drift",
+            data_class="internal",
+            content_hash=sha256_text("internal payload"),
+            retention_policy="retain-until-2026-05-01",
+            deletion_policy="delete",
+            encryption_status="encrypted",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "lifecycle-replay-artifact"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        metadata = ArtifactPayloadMetadata(
+            artifact_id=artifact_id,
+            payload_uri="artifact://local/replay-drift/blob",
+            storage_backend="local_encrypted_store",
+            data_class="internal",
+            content_hash=artifact.content_hash,
+            payload_hash=payload_hash({"blob": "internal"}),
+            size_bytes=64,
+            retention_policy=artifact.retention_policy,
+            retention_due_at="2026-05-01T00:00:00Z",
+            deletion_policy=artifact.deletion_policy,
+            encryption_status="encrypted",
+            encryption_key_ref="kms://local/internal/key",
+            access_policy={"read": ["kernel"]},
+        )
+        self.store.record_artifact_payload_metadata(command("artifact.payload", "lifecycle-replay-metadata"), metadata)
+        packet = self.store.scan_artifact_retention_due(
+            command("artifact.retention_scan", "lifecycle-replay-scan", requested_by="scheduler"),
+            "2026-05-09T00:00:00Z",
+        )[0]
+        self.store.complete_artifact_lifecycle_task(
+            command("artifact.lifecycle_complete", "lifecycle-replay-delete"),
+            packet.packet_id,
+            receipt_ref="artifact://local/replay-drift/delete-receipt",
+            receipt_hash=sha256_text("deleted"),
+        )
+
+        comparison = self.store.compare_artifact_lifecycle_replay_to_projection(
+            command("artifact.lifecycle_compare", "lifecycle-replay-compare"),
+            artifact_id,
+        )
+        self.assertTrue(comparison.matches)
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE artifact_payload_metadata SET status='active' WHERE metadata_id=?",
+                (metadata.metadata_id,),
+            )
+        drift = self.store.compare_artifact_lifecycle_replay_to_projection(
+            command("artifact.lifecycle_compare", "lifecycle-replay-drift"),
+            artifact_id,
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("artifact_payload_metadata", drift.mismatches)
+
     def test_kernel_backup_manifest_and_restore_preserve_audit_and_governed_records(self):
         grant = CapabilityGrant(
             grant_id=new_id(),
@@ -537,6 +744,9 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("project_customer_commitment_receipts", tables)
         self.assertIn("project_customer_visible_replay_projection_comparisons", tables)
         self.assertIn("artifact_governance_records", tables)
+        self.assertIn("artifact_payload_metadata", tables)
+        self.assertIn("artifact_lifecycle_task_packets", tables)
+        self.assertIn("artifact_lifecycle_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):

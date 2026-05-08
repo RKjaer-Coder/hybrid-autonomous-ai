@@ -791,6 +791,58 @@ CREATE TABLE IF NOT EXISTS artifact_governance_records (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS artifact_payload_metadata (
+  metadata_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifact_refs(artifact_id),
+  payload_uri TEXT NOT NULL,
+  storage_backend TEXT NOT NULL,
+  data_class TEXT NOT NULL CHECK (data_class IN ('public','internal','sensitive','secret_ref','regulated','client_confidential')),
+  content_hash TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  retention_policy TEXT NOT NULL,
+  retention_due_at TEXT NOT NULL,
+  deletion_policy TEXT NOT NULL,
+  encryption_status TEXT NOT NULL CHECK (encryption_status IN ('unencrypted','encrypted','quarantined','deleted')),
+  encryption_key_ref TEXT,
+  access_policy_json TEXT NOT NULL CHECK (json_valid(access_policy_json)),
+  legal_hold INTEGER NOT NULL CHECK (legal_hold IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('active','quarantined','deletion_due','deleted','crypto_shredded')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS artifact_lifecycle_task_packets (
+  packet_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifact_refs(artifact_id),
+  metadata_id TEXT NOT NULL REFERENCES artifact_payload_metadata(metadata_id),
+  action TEXT NOT NULL CHECK (action IN ('quarantine','delete','crypto_shred')),
+  reason TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  required_authority TEXT NOT NULL CHECK (required_authority IN ('rule','single_agent','council','operator_gate')),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  receipt_required INTEGER NOT NULL CHECK (receipt_required IN (0, 1)),
+  receipt_ref TEXT,
+  receipt_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('queued','completed','blocked')),
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS artifact_lifecycle_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifact_refs(artifact_id),
+  replay_artifact_state_json TEXT NOT NULL CHECK (json_valid(replay_artifact_state_json)),
+  projection_artifact_state_json TEXT NOT NULL CHECK (json_valid(projection_artifact_state_json)),
+  replay_payload_metadata_json TEXT NOT NULL CHECK (json_valid(replay_payload_metadata_json)),
+  projection_payload_metadata_json TEXT NOT NULL CHECK (json_valid(projection_payload_metadata_json)),
+  replay_task_packets_json TEXT NOT NULL CHECK (json_valid(replay_task_packets_json)),
+  projection_task_packets_json TEXT NOT NULL CHECK (json_valid(projection_task_packets_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS side_effect_intents (
   intent_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -894,6 +946,11 @@ CREATE INDEX IF NOT EXISTS idx_budget_reservations_budget_status ON budget_reser
 CREATE INDEX IF NOT EXISTS idx_artifact_refs_data_class ON artifact_refs(data_class, created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_governance_records_artifact ON artifact_governance_records(artifact_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_governance_records_action ON artifact_governance_records(action, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_payload_metadata_due ON artifact_payload_metadata(status, legal_hold, retention_due_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_payload_metadata_artifact ON artifact_payload_metadata(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_due ON artifact_lifecycle_task_packets(status, action, due_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_artifact ON artifact_lifecycle_task_packets(artifact_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_replay_projection_artifact ON artifact_lifecycle_replay_projection_comparisons(artifact_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_side_effect_intents_status ON side_effect_intents(status, side_effect_type);
 CREATE INDEX IF NOT EXISTS idx_side_effect_receipts_intent ON side_effect_receipts(intent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_projection_outbox_status ON projection_outbox(status, created_at);
