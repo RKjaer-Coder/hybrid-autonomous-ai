@@ -5,6 +5,7 @@ the first v3.1 authoritative command/event/capability/budget/side-effect spine.
 """
 
 from .records import (
+    ArtifactGovernanceRecord,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -130,6 +131,7 @@ from .runtime import (
 
 __all__ = [
     "ArtifactRef",
+    "ArtifactGovernanceRecord",
     "Budget",
     "CapabilityGrant",
     "ClaimRecord",

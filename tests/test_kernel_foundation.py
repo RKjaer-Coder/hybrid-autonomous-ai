@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from kernel import (
+    ArtifactGovernanceRecord,
     ArtifactRef,
     Budget,
     CapabilityGrant,
@@ -19,14 +20,22 @@ from kernel.records import new_id, payload_hash, sha256_text
 from kernel.store import KERNEL_POLICY_VERSION
 
 
-def command(command_type: str, key: str, payload: dict | None = None) -> Command:
+def command(
+    command_type: str,
+    key: str,
+    payload: dict | None = None,
+    *,
+    requested_by: str = "operator",
+    requested_authority: str | None = None,
+) -> Command:
     return Command(
         command_type=command_type,
-        requested_by="operator",
-        requester_id="operator",
+        requested_by=requested_by,  # type: ignore[arg-type]
+        requester_id=requested_by,
         target_entity_type="kernel",
         idempotency_key=key,
         payload=payload or {"key": key},
+        requested_authority=requested_authority,  # type: ignore[arg-type]
     )
 
 
@@ -253,6 +262,100 @@ class KernelFoundationTests(unittest.TestCase):
         replay = self.store.replay_critical_state()
         self.assertEqual(replay.artifact_refs[artifact.artifact_id]["data_class"], "client_confidential")
 
+    def test_artifact_governance_records_redaction_and_crypto_shred_receipts(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/client-dossier",
+            data_class="client_confidential",
+            content_hash=sha256_text("client content"),
+            retention_policy="retain-30d",
+            deletion_policy="crypto-shred",
+            encryption_status="encrypted",
+            source_notes="client artifact",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "artifact-client-dossier"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        redaction = ArtifactGovernanceRecord(
+            artifact_id=artifact_id,
+            action="redact",
+            reason="Remove client identifying details before evidence sharing.",
+            required_authority="operator_gate",
+            evidence_refs=[f"kernel:artifact_refs/{artifact_id}", "operator://redaction-review/1"],
+            receipt_ref="artifact://local/client-dossier/redaction-receipt",
+            receipt_hash=sha256_text("redacted"),
+        )
+        redaction_id = self.store.record_artifact_governance(
+            command("artifact.governance", "artifact-redaction", requested_authority="operator_gate"),
+            redaction,
+        )
+        shred = ArtifactGovernanceRecord(
+            artifact_id=artifact_id,
+            action="crypto_shred",
+            reason="Retention period ended and deletion policy requires crypto-shredding.",
+            required_authority="operator_gate",
+            evidence_refs=[f"kernel:artifact_governance_records/{redaction_id}"],
+            receipt_ref="kms://local/key/client-dossier/shredded",
+            receipt_hash=sha256_text("key destroyed"),
+        )
+        shred_id = self.store.record_artifact_governance(
+            command("artifact.governance", "artifact-shred", requested_authority="operator_gate"),
+            shred,
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.artifact_governance_records[redaction_id]["action"], "redact")
+        self.assertEqual(replay.artifact_governance_records[shred_id]["action"], "crypto_shred")
+        self.assertEqual(replay.artifact_refs[artifact_id]["encryption_status"], "deleted")
+        with self.store.connect() as conn:
+            row = conn.execute("SELECT encryption_status FROM artifact_refs WHERE artifact_id=?", (artifact_id,)).fetchone()
+        self.assertEqual(row["encryption_status"], "deleted")
+
+    def test_artifact_governance_fails_closed_for_sensitive_worker_or_missing_receipts(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/secret",
+            data_class="secret_ref",
+            content_hash=sha256_text("secret pointer"),
+            retention_policy="retain-7d",
+            deletion_policy="crypto-shred",
+            encryption_status="encrypted",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "artifact-secret"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        record = ArtifactGovernanceRecord(
+            artifact_id=artifact_id,
+            action="delete",
+            reason="Delete secret pointer.",
+            required_authority="operator_gate",
+            evidence_refs=[f"kernel:artifact_refs/{artifact_id}"],
+            receipt_ref="kms://receipt",
+            receipt_hash=sha256_text("deleted"),
+        )
+        with self.assertRaises(PermissionError):
+            self.store.record_artifact_governance(
+                command(
+                    "artifact.governance",
+                    "artifact-worker-delete",
+                    requested_by="agent",
+                    requested_authority="operator_gate",
+                ),
+                record,
+            )
+        missing_receipt = ArtifactGovernanceRecord(
+            artifact_id=artifact_id,
+            action="delete",
+            reason="Delete secret pointer.",
+            required_authority="operator_gate",
+            evidence_refs=[f"kernel:artifact_refs/{artifact_id}"],
+        )
+        with self.assertRaises(ValueError):
+            self.store.record_artifact_governance(
+                command("artifact.governance", "artifact-missing-receipt", requested_authority="operator_gate"),
+                missing_receipt,
+            )
+
     def test_unknown_event_schema_version_fails_closed_for_replay(self):
         budget = Budget(
             budget_id=new_id(),
@@ -302,6 +405,7 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("project_customer_commitments", tables)
         self.assertIn("project_customer_commitment_receipts", tables)
         self.assertIn("project_customer_visible_replay_projection_comparisons", tables)
+        self.assertIn("artifact_governance_records", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):
