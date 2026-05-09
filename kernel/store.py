@@ -12,6 +12,7 @@ from .records import (
     ArtifactLifecycleTaskPacket,
     ArtifactPayloadMetadata,
     ArtifactRef,
+    BackupCadenceRecord,
     Budget,
     CapabilityGrant,
     Command,
@@ -52,7 +53,11 @@ from .records import (
     ProjectStatusRollup,
     ProjectTask,
     ProjectTaskAssignment,
+    RecoveryChecklistReceipt,
+    RecoveryReplayProjectionComparison,
+    RecoveryVerificationState,
     ResearchRequest,
+    RestoreDrillPacket,
     SourceAcquisitionCheck,
     SourcePlan,
     SideEffectIntent,
@@ -102,6 +107,11 @@ class ReplayState:
     artifact_payload_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_lifecycle_task_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_lifecycle_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    backup_cadence_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    restore_drill_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    recovery_checklist_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    recovery_verification_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    recovery_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     research_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_acquisition_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -291,6 +301,44 @@ class KernelStore:
     ) -> ArtifactLifecycleReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> ArtifactLifecycleReplayProjectionComparison:
             return tx.compare_artifact_lifecycle_replay_to_projection(artifact_id)
+
+        return self.execute_command(command, handler)
+
+    def record_backup_cadence(self, command: Command, record: BackupCadenceRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_backup_cadence(record)
+
+        return self.execute_command(command, handler)
+
+    def create_restore_drill_packet(self, command: Command, packet: RestoreDrillPacket) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.create_restore_drill_packet(packet)
+
+        return self.execute_command(command, handler)
+
+    def record_recovery_checklist_receipt(self, command: Command, receipt: RecoveryChecklistReceipt) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_recovery_checklist_receipt(receipt)
+
+        return self.execute_command(command, handler)
+
+    def record_recovery_verification_state(
+        self,
+        command: Command,
+        verification: RecoveryVerificationState,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_recovery_verification_state(verification)
+
+        return self.execute_command(command, handler)
+
+    def compare_recovery_replay_to_projection(
+        self,
+        command: Command,
+        drill_id: str,
+    ) -> RecoveryReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> RecoveryReplayProjectionComparison:
+            return tx.compare_recovery_replay_to_projection(drill_id)
 
         return self.execute_command(command, handler)
 
@@ -993,6 +1041,20 @@ class KernelStore:
                 metadata["updated_at"] = payload["completed_at"]
         elif event_type == "artifact_lifecycle_replay_projection_compared":
             state.artifact_lifecycle_replay_projection_comparisons[entity_id] = dict(payload)
+        elif event_type == "backup_cadence_recorded":
+            state.backup_cadence_records[entity_id] = dict(payload)
+        elif event_type == "restore_drill_packet_created":
+            state.restore_drill_packets[entity_id] = dict(payload)
+        elif event_type == "recovery_checklist_receipt_recorded":
+            state.recovery_checklist_receipts[entity_id] = dict(payload)
+        elif event_type == "recovery_verification_state_recorded":
+            state.recovery_verification_states[entity_id] = dict(payload)
+            packet = state.restore_drill_packets.get(payload["drill_id"])
+            if packet is not None:
+                packet["status"] = payload["status"]
+                packet["completed_at"] = payload["verified_at"]
+        elif event_type == "recovery_replay_projection_compared":
+            state.recovery_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "research_request_created":
             state.research_requests[entity_id] = dict(payload)
         elif event_type == "research_request_transitioned":
@@ -1876,6 +1938,298 @@ class KernelTransaction:
             ),
         )
         self.enqueue_projection(event_id, "artifact_lifecycle_replay_projection_comparison_projection")
+        return comparison
+
+    def record_backup_cadence(self, record: BackupCadenceRecord) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("backup cadence records are kernel-owned")
+        if not record.scope.strip() or not record.backup_target.strip():
+            raise ValueError("backup cadence scope and target are required")
+        if record.status == "active" and not record.encryption_required:
+            raise PermissionError("active backup cadence records must require encryption")
+        payload = _backup_cadence_record_payload(record)
+        event_id = self.append_event("backup_cadence_recorded", "policy", record.cadence_id, payload, "internal")
+        self.conn.execute(
+            """
+            INSERT INTO backup_cadence_records (
+              cadence_id, scope, cadence, backup_target, encryption_required,
+              retention_policy, recovery_point_objective, next_due_at, status,
+              evidence_refs_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.cadence_id,
+                record.scope,
+                record.cadence,
+                record.backup_target,
+                1 if record.encryption_required else 0,
+                record.retention_policy,
+                record.recovery_point_objective,
+                record.next_due_at,
+                record.status,
+                canonical_json(record.evidence_refs),
+                record.created_at,
+                record.updated_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "backup_cadence_projection")
+        return record.cadence_id
+
+    def create_restore_drill_packet(self, packet: RestoreDrillPacket) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("restore drill packets are kernel-owned")
+        cadence = self.conn.execute(
+            "SELECT * FROM backup_cadence_records WHERE cadence_id=?",
+            (packet.cadence_id,),
+        ).fetchone()
+        if cadence is None:
+            raise ValueError("restore drill packet requires an existing backup cadence")
+        if cadence["status"] != "active":
+            raise PermissionError("restore drill packets require an active backup cadence")
+        if not packet.backup_ref.strip() or not packet.backup_manifest_hash.strip():
+            raise ValueError("restore drill packet requires backup reference and manifest hash")
+        if not packet.checklist_items:
+            raise ValueError("restore drill packet requires checklist items")
+        payload = _restore_drill_packet_payload(packet)
+        event_id = self.append_event("restore_drill_packet_created", "policy", packet.drill_id, payload, "internal")
+        self.conn.execute(
+            """
+            INSERT INTO restore_drill_packets (
+              drill_id, cadence_id, backup_ref, backup_manifest_hash, drill_scope,
+              scheduled_for, required_authority, checklist_items_json,
+              evidence_refs_json, status, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                packet.drill_id,
+                packet.cadence_id,
+                packet.backup_ref,
+                packet.backup_manifest_hash,
+                packet.drill_scope,
+                packet.scheduled_for,
+                packet.required_authority,
+                canonical_json(packet.checklist_items),
+                canonical_json(packet.evidence_refs),
+                packet.status,
+                packet.created_at,
+                packet.completed_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "restore_drill_packet_projection")
+        return packet.drill_id
+
+    def record_recovery_checklist_receipt(self, receipt: RecoveryChecklistReceipt) -> str:
+        if self.command.requested_by != "operator" or self.command.requested_authority != "operator_gate":
+            raise PermissionError("recovery checklist receipts require operator-gate authority")
+        packet = self.conn.execute(
+            "SELECT * FROM restore_drill_packets WHERE drill_id=?",
+            (receipt.drill_id,),
+        ).fetchone()
+        if packet is None:
+            raise ValueError("recovery checklist receipt requires an existing restore drill packet")
+        if packet["status"] != "queued":
+            raise ValueError(f"cannot receipt recovery checklist from drill status {packet['status']}")
+        if not receipt.checklist_results:
+            raise ValueError("recovery checklist receipt requires checklist results")
+        if not receipt.receipt_ref.strip() or not receipt.receipt_hash.strip():
+            raise ValueError("recovery checklist receipt requires durable receipt references")
+        payload = _recovery_checklist_receipt_payload(receipt)
+        event_id = self.append_event(
+            "recovery_checklist_receipt_recorded",
+            "policy",
+            receipt.receipt_id,
+            payload,
+            "internal",
+            actor_type="operator",
+            actor_id=receipt.operator_id,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO recovery_checklist_receipts (
+              receipt_id, drill_id, operator_id, checklist_results_json,
+              receipt_ref, receipt_hash, status, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt.receipt_id,
+                receipt.drill_id,
+                receipt.operator_id,
+                canonical_json(receipt.checklist_results),
+                receipt.receipt_ref,
+                receipt.receipt_hash,
+                receipt.status,
+                receipt.notes,
+                receipt.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "recovery_checklist_receipt_projection")
+        return receipt.receipt_id
+
+    def record_recovery_verification_state(self, verification: RecoveryVerificationState) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("recovery verification state is kernel-owned")
+        packet = self.conn.execute(
+            "SELECT * FROM restore_drill_packets WHERE drill_id=?",
+            (verification.drill_id,),
+        ).fetchone()
+        if packet is None:
+            raise ValueError("recovery verification requires an existing restore drill packet")
+        if packet["status"] != "queued":
+            raise ValueError(f"cannot verify recovery drill from status {packet['status']}")
+        if verification.cadence_id != packet["cadence_id"]:
+            raise ValueError("recovery verification cadence does not match restore drill packet")
+        if verification.backup_manifest_hash != packet["backup_manifest_hash"]:
+            raise ValueError("recovery verification manifest hash does not match restore drill packet")
+        all_checks_pass = all(bool(value) for value in verification.verification_checks.values())
+        if verification.status == "verified":
+            if verification.fail_closed or not all_checks_pass or verification.mismatch_summary:
+                raise PermissionError("verified recovery state requires passing checks and open fail-closed gate")
+            if verification.receipt_id is None:
+                raise PermissionError("verified recovery state requires an accepted operator checklist receipt")
+            receipt = self.conn.execute(
+                "SELECT * FROM recovery_checklist_receipts WHERE receipt_id=? AND drill_id=?",
+                (verification.receipt_id, verification.drill_id),
+            ).fetchone()
+            if receipt is None or receipt["status"] != "accepted":
+                raise PermissionError("verified recovery state requires an accepted operator checklist receipt")
+        elif not verification.fail_closed:
+            raise PermissionError("failed or blocked recovery verification must fail closed")
+        payload = _recovery_verification_state_payload(verification)
+        event_id = self.append_event(
+            "recovery_verification_state_recorded",
+            "policy",
+            verification.verification_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO recovery_verification_states (
+              verification_id, drill_id, cadence_id, receipt_id,
+              backup_manifest_hash, status, fail_closed, verification_checks_json,
+              mismatch_summary_json, evidence_refs_json, verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verification.verification_id,
+                verification.drill_id,
+                verification.cadence_id,
+                verification.receipt_id,
+                verification.backup_manifest_hash,
+                verification.status,
+                1 if verification.fail_closed else 0,
+                canonical_json(verification.verification_checks),
+                canonical_json(verification.mismatch_summary),
+                canonical_json(verification.evidence_refs),
+                verification.verified_at,
+            ),
+        )
+        self.conn.execute(
+            "UPDATE restore_drill_packets SET status=?, completed_at=? WHERE drill_id=?",
+            (verification.status, verification.verified_at, verification.drill_id),
+        )
+        self.enqueue_projection(event_id, "recovery_verification_state_projection")
+        return verification.verification_id
+
+    def compare_recovery_replay_to_projection(self, drill_id: str) -> RecoveryReplayProjectionComparison:
+        projection_drill = self.conn.execute(
+            "SELECT * FROM restore_drill_packets WHERE drill_id=?",
+            (drill_id,),
+        ).fetchone()
+        if projection_drill is None:
+            raise ValueError("restore drill packet not found")
+        projection_cadence = self.conn.execute(
+            "SELECT * FROM backup_cadence_records WHERE cadence_id=?",
+            (projection_drill["cadence_id"],),
+        ).fetchone()
+        replay = KernelStore._replay_from_connection(self.conn)
+        replay_cadence = replay.backup_cadence_records.get(projection_drill["cadence_id"], {})
+        replay_drill_packet = replay.restore_drill_packets.get(drill_id, {})
+        replay_checklist_receipts = sorted(
+            (
+                dict(value)
+                for value in replay.recovery_checklist_receipts.values()
+                if value["drill_id"] == drill_id
+            ),
+            key=lambda item: item["receipt_id"],
+        )
+        replay_verification_state = next(
+            (dict(value) for value in replay.recovery_verification_states.values() if value["drill_id"] == drill_id),
+            {},
+        )
+        projection_receipts = [
+            _recovery_checklist_receipt_row_payload(row)
+            for row in self.conn.execute(
+                "SELECT * FROM recovery_checklist_receipts WHERE drill_id=? ORDER BY receipt_id",
+                (drill_id,),
+            ).fetchall()
+        ]
+        projection_verification = self.conn.execute(
+            "SELECT * FROM recovery_verification_states WHERE drill_id=?",
+            (drill_id,),
+        ).fetchone()
+        projection_cadence_payload = {} if projection_cadence is None else _backup_cadence_record_row_payload(projection_cadence)
+        projection_drill_payload = _restore_drill_packet_row_payload(projection_drill)
+        projection_verification_payload = (
+            {} if projection_verification is None else _recovery_verification_state_row_payload(projection_verification)
+        )
+        mismatches: list[str] = []
+        if replay_cadence != projection_cadence_payload:
+            mismatches.append("backup_cadence_records")
+        if replay_drill_packet != projection_drill_payload:
+            mismatches.append("restore_drill_packets")
+        if replay_checklist_receipts != projection_receipts:
+            mismatches.append("recovery_checklist_receipts")
+        if replay_verification_state != projection_verification_payload:
+            mismatches.append("recovery_verification_states")
+        comparison = RecoveryReplayProjectionComparison(
+            drill_id=drill_id,
+            replay_cadence=replay_cadence,
+            projection_cadence=projection_cadence_payload,
+            replay_drill_packet=replay_drill_packet,
+            projection_drill_packet=projection_drill_payload,
+            replay_checklist_receipts=replay_checklist_receipts,
+            projection_checklist_receipts=projection_receipts,
+            replay_verification_state=replay_verification_state,
+            projection_verification_state=projection_verification_payload,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _recovery_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event(
+            "recovery_replay_projection_compared",
+            "policy",
+            comparison.comparison_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO recovery_replay_projection_comparisons (
+              comparison_id, drill_id, replay_cadence_json, projection_cadence_json,
+              replay_drill_packet_json, projection_drill_packet_json,
+              replay_checklist_receipts_json, projection_checklist_receipts_json,
+              replay_verification_state_json, projection_verification_state_json,
+              matches, mismatches_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.drill_id,
+                canonical_json(comparison.replay_cadence),
+                canonical_json(comparison.projection_cadence),
+                canonical_json(comparison.replay_drill_packet),
+                canonical_json(comparison.projection_drill_packet),
+                canonical_json(comparison.replay_checklist_receipts),
+                canonical_json(comparison.projection_checklist_receipts),
+                canonical_json(comparison.replay_verification_state),
+                canonical_json(comparison.projection_verification_state),
+                1 if comparison.matches else 0,
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "recovery_replay_projection_comparison_projection")
         return comparison
 
     def create_research_request(self, request: ResearchRequest) -> str:
@@ -7247,6 +7601,154 @@ def _artifact_lifecycle_replay_projection_comparison_payload(
         "projection_payload_metadata": comparison.projection_payload_metadata,
         "replay_task_packets": comparison.replay_task_packets,
         "projection_task_packets": comparison.projection_task_packets,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
+    }
+
+
+def _backup_cadence_record_payload(record: BackupCadenceRecord) -> dict[str, Any]:
+    return {
+        "cadence_id": record.cadence_id,
+        "scope": record.scope,
+        "cadence": record.cadence,
+        "backup_target": record.backup_target,
+        "encryption_required": record.encryption_required,
+        "retention_policy": record.retention_policy,
+        "recovery_point_objective": record.recovery_point_objective,
+        "next_due_at": record.next_due_at,
+        "status": record.status,
+        "evidence_refs": record.evidence_refs,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+def _restore_drill_packet_payload(packet: RestoreDrillPacket) -> dict[str, Any]:
+    return {
+        "drill_id": packet.drill_id,
+        "cadence_id": packet.cadence_id,
+        "backup_ref": packet.backup_ref,
+        "backup_manifest_hash": packet.backup_manifest_hash,
+        "drill_scope": packet.drill_scope,
+        "scheduled_for": packet.scheduled_for,
+        "required_authority": packet.required_authority,
+        "checklist_items": packet.checklist_items,
+        "evidence_refs": packet.evidence_refs,
+        "status": packet.status,
+        "created_at": packet.created_at,
+        "completed_at": packet.completed_at,
+    }
+
+
+def _recovery_checklist_receipt_payload(receipt: RecoveryChecklistReceipt) -> dict[str, Any]:
+    return {
+        "receipt_id": receipt.receipt_id,
+        "drill_id": receipt.drill_id,
+        "operator_id": receipt.operator_id,
+        "checklist_results": receipt.checklist_results,
+        "receipt_ref": receipt.receipt_ref,
+        "receipt_hash": receipt.receipt_hash,
+        "status": receipt.status,
+        "notes": receipt.notes,
+        "created_at": receipt.created_at,
+    }
+
+
+def _recovery_verification_state_payload(verification: RecoveryVerificationState) -> dict[str, Any]:
+    return {
+        "verification_id": verification.verification_id,
+        "drill_id": verification.drill_id,
+        "cadence_id": verification.cadence_id,
+        "receipt_id": verification.receipt_id,
+        "backup_manifest_hash": verification.backup_manifest_hash,
+        "status": verification.status,
+        "fail_closed": verification.fail_closed,
+        "verification_checks": verification.verification_checks,
+        "mismatch_summary": verification.mismatch_summary,
+        "evidence_refs": verification.evidence_refs,
+        "verified_at": verification.verified_at,
+    }
+
+
+def _backup_cadence_record_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "cadence_id": row["cadence_id"],
+        "scope": row["scope"],
+        "cadence": row["cadence"],
+        "backup_target": row["backup_target"],
+        "encryption_required": bool(row["encryption_required"]),
+        "retention_policy": row["retention_policy"],
+        "recovery_point_objective": row["recovery_point_objective"],
+        "next_due_at": row["next_due_at"],
+        "status": row["status"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _restore_drill_packet_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "drill_id": row["drill_id"],
+        "cadence_id": row["cadence_id"],
+        "backup_ref": row["backup_ref"],
+        "backup_manifest_hash": row["backup_manifest_hash"],
+        "drill_scope": row["drill_scope"],
+        "scheduled_for": row["scheduled_for"],
+        "required_authority": row["required_authority"],
+        "checklist_items": _loads(row["checklist_items_json"]),
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def _recovery_checklist_receipt_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "receipt_id": row["receipt_id"],
+        "drill_id": row["drill_id"],
+        "operator_id": row["operator_id"],
+        "checklist_results": _loads(row["checklist_results_json"]),
+        "receipt_ref": row["receipt_ref"],
+        "receipt_hash": row["receipt_hash"],
+        "status": row["status"],
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+    }
+
+
+def _recovery_verification_state_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "verification_id": row["verification_id"],
+        "drill_id": row["drill_id"],
+        "cadence_id": row["cadence_id"],
+        "receipt_id": row["receipt_id"],
+        "backup_manifest_hash": row["backup_manifest_hash"],
+        "status": row["status"],
+        "fail_closed": bool(row["fail_closed"]),
+        "verification_checks": _loads(row["verification_checks_json"]),
+        "mismatch_summary": _loads(row["mismatch_summary_json"]),
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "verified_at": row["verified_at"],
+    }
+
+
+def _recovery_replay_projection_comparison_payload(
+    comparison: RecoveryReplayProjectionComparison,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "drill_id": comparison.drill_id,
+        "replay_cadence": comparison.replay_cadence,
+        "projection_cadence": comparison.projection_cadence,
+        "replay_drill_packet": comparison.replay_drill_packet,
+        "projection_drill_packet": comparison.projection_drill_packet,
+        "replay_checklist_receipts": comparison.replay_checklist_receipts,
+        "projection_checklist_receipts": comparison.projection_checklist_receipts,
+        "replay_verification_state": comparison.replay_verification_state,
+        "projection_verification_state": comparison.projection_verification_state,
         "matches": comparison.matches,
         "mismatches": comparison.mismatches,
         "created_at": comparison.created_at,

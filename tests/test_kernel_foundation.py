@@ -10,10 +10,14 @@ from kernel import (
     ArtifactGovernanceRecord,
     ArtifactPayloadMetadata,
     ArtifactRef,
+    BackupCadenceRecord,
     Budget,
     CapabilityGrant,
     Command,
     KernelStore,
+    RecoveryChecklistReceipt,
+    RecoveryVerificationState,
+    RestoreDrillPacket,
     SideEffectIntent,
     SideEffectReceipt,
     create_kernel_backup,
@@ -566,6 +570,154 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertFalse(drift.matches)
         self.assertIn("artifact_payload_metadata", drift.mismatches)
 
+    def test_backup_cadence_restore_drill_and_recovery_verification_are_replayable(self):
+        cadence = BackupCadenceRecord(
+            scope="kernel.db",
+            cadence="daily",
+            backup_target="artifact://local/encrypted-kernel-backups",
+            encryption_required=True,
+            retention_policy="retain-30d",
+            recovery_point_objective="24h",
+            next_due_at="2026-05-10T00:00:00Z",
+            evidence_refs=["spec:s08_operator_deployment"],
+        )
+        self.store.record_backup_cadence(command("backup.cadence", "recovery-cadence", requested_by="kernel"), cadence)
+        packet = RestoreDrillPacket(
+            cadence_id=cadence.cadence_id,
+            backup_ref="artifact://local/encrypted-kernel-backups/kernel-2026-05-09",
+            backup_manifest_hash=sha256_text("manifest"),
+            drill_scope="kernel.db restore into isolated verification path",
+            scheduled_for="2026-05-10T01:00:00Z",
+            checklist_items=[
+                {"id": "schema", "label": "Verify schema fidelity"},
+                {"id": "hash_chain", "label": "Verify event hash chain"},
+                {"id": "receipts", "label": "Confirm governed receipts survived"},
+            ],
+            evidence_refs=[f"kernel:backup_cadence_records/{cadence.cadence_id}"],
+        )
+        self.store.create_restore_drill_packet(command("backup.drill", "recovery-drill", requested_by="scheduler"), packet)
+        receipt = RecoveryChecklistReceipt(
+            drill_id=packet.drill_id,
+            operator_id="operator",
+            checklist_results=[
+                {"id": "schema", "status": "pass"},
+                {"id": "hash_chain", "status": "pass"},
+                {"id": "receipts", "status": "pass"},
+            ],
+            receipt_ref="artifact://local/recovery-drills/receipt",
+            receipt_hash=sha256_text("operator checklist receipt"),
+            status="accepted",
+        )
+        self.store.record_recovery_checklist_receipt(
+            command(
+                "backup.recovery_receipt",
+                "recovery-checklist-receipt",
+                requested_authority="operator_gate",
+            ),
+            receipt,
+        )
+        verification = RecoveryVerificationState(
+            drill_id=packet.drill_id,
+            cadence_id=cadence.cadence_id,
+            receipt_id=receipt.receipt_id,
+            backup_manifest_hash=packet.backup_manifest_hash,
+            status="verified",
+            fail_closed=False,
+            verification_checks={
+                "schema_fidelity": True,
+                "event_hash_chain": True,
+                "governed_receipts": True,
+                "restore_copy_verified": True,
+            },
+            mismatch_summary=[],
+            evidence_refs=[
+                f"kernel:restore_drill_packets/{packet.drill_id}",
+                f"kernel:recovery_checklist_receipts/{receipt.receipt_id}",
+            ],
+        )
+        self.store.record_recovery_verification_state(
+            command("backup.recovery_verify", "recovery-verification", requested_by="kernel"),
+            verification,
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.backup_cadence_records[cadence.cadence_id]["cadence"], "daily")
+        self.assertEqual(replay.restore_drill_packets[packet.drill_id]["status"], "verified")
+        self.assertEqual(replay.recovery_checklist_receipts[receipt.receipt_id]["receipt_hash"], receipt.receipt_hash)
+        self.assertFalse(replay.recovery_verification_states[verification.verification_id]["fail_closed"])
+        comparison = self.store.compare_recovery_replay_to_projection(
+            command("backup.recovery_compare", "recovery-replay-compare", requested_by="kernel"),
+            packet.drill_id,
+        )
+        self.assertTrue(comparison.matches)
+
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE recovery_verification_states SET fail_closed=1 WHERE verification_id=?",
+                (verification.verification_id,),
+            )
+        drift = self.store.compare_recovery_replay_to_projection(
+            command("backup.recovery_compare", "recovery-replay-drift", requested_by="kernel"),
+            packet.drill_id,
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("recovery_verification_states", drift.mismatches)
+
+    def test_recovery_verification_fails_closed_without_receipt_or_passing_checks(self):
+        cadence = BackupCadenceRecord(
+            scope="kernel.db",
+            cadence="weekly",
+            backup_target="artifact://local/encrypted-kernel-backups",
+            encryption_required=True,
+            retention_policy="retain-90d",
+            recovery_point_objective="24h",
+            next_due_at="2026-05-16T00:00:00Z",
+            evidence_refs=[],
+        )
+        self.store.record_backup_cadence(command("backup.cadence", "failed-recovery-cadence", requested_by="kernel"), cadence)
+        packet = RestoreDrillPacket(
+            cadence_id=cadence.cadence_id,
+            backup_ref="artifact://local/encrypted-kernel-backups/kernel-2026-05-09",
+            backup_manifest_hash=sha256_text("failed manifest"),
+            drill_scope="isolated restore",
+            scheduled_for="2026-05-16T01:00:00Z",
+            checklist_items=[{"id": "schema", "label": "Verify schema fidelity"}],
+            evidence_refs=[],
+        )
+        self.store.create_restore_drill_packet(command("backup.drill", "failed-recovery-drill", requested_by="scheduler"), packet)
+        with self.assertRaises(PermissionError):
+            self.store.record_recovery_verification_state(
+                command("backup.recovery_verify", "receiptless-verified-recovery", requested_by="kernel"),
+                RecoveryVerificationState(
+                    drill_id=packet.drill_id,
+                    cadence_id=cadence.cadence_id,
+                    backup_manifest_hash=packet.backup_manifest_hash,
+                    status="verified",
+                    fail_closed=False,
+                    verification_checks={"schema_fidelity": True},
+                    mismatch_summary=[],
+                    evidence_refs=[],
+                ),
+            )
+
+        failed = RecoveryVerificationState(
+            drill_id=packet.drill_id,
+            cadence_id=cadence.cadence_id,
+            backup_manifest_hash=packet.backup_manifest_hash,
+            status="failed",
+            fail_closed=True,
+            verification_checks={"schema_fidelity": False},
+            mismatch_summary=["schema_fidelity"],
+            evidence_refs=[f"kernel:restore_drill_packets/{packet.drill_id}"],
+        )
+        self.store.record_recovery_verification_state(
+            command("backup.recovery_verify", "failed-closed-recovery", requested_by="kernel"),
+            failed,
+        )
+        replay = self.store.replay_critical_state()
+        self.assertTrue(replay.recovery_verification_states[failed.verification_id]["fail_closed"])
+        self.assertEqual(replay.restore_drill_packets[packet.drill_id]["status"], "failed")
+
     def test_kernel_backup_manifest_and_restore_preserve_audit_and_governed_records(self):
         grant = CapabilityGrant(
             grant_id=new_id(),
@@ -747,6 +899,11 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("artifact_payload_metadata", tables)
         self.assertIn("artifact_lifecycle_task_packets", tables)
         self.assertIn("artifact_lifecycle_replay_projection_comparisons", tables)
+        self.assertIn("backup_cadence_records", tables)
+        self.assertIn("restore_drill_packets", tables)
+        self.assertIn("recovery_checklist_receipts", tables)
+        self.assertIn("recovery_verification_states", tables)
+        self.assertIn("recovery_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):

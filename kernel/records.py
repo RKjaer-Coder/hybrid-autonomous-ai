@@ -18,6 +18,11 @@ ArtifactGovernanceStatus = Literal["recorded", "applied", "blocked"]
 ArtifactPayloadStatus = Literal["active", "quarantined", "deletion_due", "deleted", "crypto_shredded"]
 ArtifactLifecycleTaskAction = Literal["quarantine", "delete", "crypto_shred"]
 ArtifactLifecycleTaskStatus = Literal["queued", "completed", "blocked"]
+BackupCadence = Literal["hourly", "daily", "weekly", "monthly"]
+BackupCadenceStatus = Literal["active", "paused", "retired"]
+RestoreDrillStatus = Literal["queued", "verified", "failed", "blocked"]
+RecoveryChecklistStatus = Literal["accepted", "rejected"]
+RecoveryVerificationStatus = Literal["verified", "failed", "blocked"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -350,6 +355,83 @@ class ArtifactLifecycleReplayProjectionComparison:
     projection_payload_metadata: list[JsonObject]
     replay_task_packets: list[JsonObject]
     projection_task_packets: list[JsonObject]
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class BackupCadenceRecord:
+    scope: str
+    cadence: BackupCadence
+    backup_target: str
+    encryption_required: bool
+    retention_policy: str
+    recovery_point_objective: str
+    next_due_at: str
+    evidence_refs: list[str]
+    status: BackupCadenceStatus = "active"
+    cadence_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class RestoreDrillPacket:
+    cadence_id: str
+    backup_ref: str
+    backup_manifest_hash: str
+    drill_scope: str
+    scheduled_for: str
+    checklist_items: list[JsonObject]
+    evidence_refs: list[str]
+    required_authority: Literal["operator_gate"] = "operator_gate"
+    status: RestoreDrillStatus = "queued"
+    drill_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+    completed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryChecklistReceipt:
+    drill_id: str
+    operator_id: str
+    checklist_results: list[JsonObject]
+    receipt_ref: str
+    receipt_hash: str
+    status: RecoveryChecklistStatus
+    notes: str | None = None
+    receipt_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class RecoveryVerificationState:
+    drill_id: str
+    cadence_id: str
+    backup_manifest_hash: str
+    status: RecoveryVerificationStatus
+    fail_closed: bool
+    verification_checks: JsonObject
+    mismatch_summary: list[str]
+    evidence_refs: list[str]
+    receipt_id: str | None = None
+    verification_id: str = field(default_factory=new_id)
+    verified_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class RecoveryReplayProjectionComparison:
+    drill_id: str
+    replay_cadence: JsonObject
+    projection_cadence: JsonObject
+    replay_drill_packet: JsonObject
+    projection_drill_packet: JsonObject
+    replay_checklist_receipts: list[JsonObject]
+    projection_checklist_receipts: list[JsonObject]
+    replay_verification_state: JsonObject
+    projection_verification_state: JsonObject
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

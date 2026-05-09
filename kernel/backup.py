@@ -18,6 +18,10 @@ GOVERNED_TABLES = {
     "artifact_governance_records",
     "side_effect_intents",
     "side_effect_receipts",
+    "backup_cadence_records",
+    "restore_drill_packets",
+    "recovery_checklist_receipts",
+    "recovery_verification_states",
 }
 
 
@@ -210,6 +214,23 @@ def _missing_governed_records(conn: sqlite3.Connection) -> list[str]:
         """
     ).fetchall()
     missing.extend(f"side_effect_receipts/{row[0]} missing side_effect_intent" for row in orphan_side_effect_receipts)
+    missing_recovery_receipts = conn.execute(
+        """
+        SELECT verification_id FROM recovery_verification_states
+        WHERE status = 'verified'
+          AND (
+            receipt_id IS NULL
+            OR receipt_id NOT IN (
+              SELECT receipt_id FROM recovery_checklist_receipts WHERE status = 'accepted'
+            )
+          )
+        ORDER BY verification_id
+        """
+    ).fetchall()
+    missing.extend(
+        f"recovery_verification_states/{row[0]} missing accepted checklist receipt"
+        for row in missing_recovery_receipts
+    )
     return missing
 
 
@@ -246,4 +267,3 @@ def _load_manifest(manifest: str | Path | dict[str, Any]) -> dict[str, Any]:
     if isinstance(manifest, dict):
         return json.loads(canonical_json(manifest))
     return json.loads(Path(manifest).read_text(encoding="utf-8"))
-

@@ -843,6 +843,78 @@ CREATE TABLE IF NOT EXISTS artifact_lifecycle_replay_projection_comparisons (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS backup_cadence_records (
+  cadence_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  cadence TEXT NOT NULL CHECK (cadence IN ('hourly','daily','weekly','monthly')),
+  backup_target TEXT NOT NULL,
+  encryption_required INTEGER NOT NULL CHECK (encryption_required IN (0, 1)),
+  retention_policy TEXT NOT NULL,
+  recovery_point_objective TEXT NOT NULL,
+  next_due_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active','paused','retired')),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS restore_drill_packets (
+  drill_id TEXT PRIMARY KEY,
+  cadence_id TEXT NOT NULL REFERENCES backup_cadence_records(cadence_id),
+  backup_ref TEXT NOT NULL,
+  backup_manifest_hash TEXT NOT NULL,
+  drill_scope TEXT NOT NULL,
+  scheduled_for TEXT NOT NULL,
+  required_authority TEXT NOT NULL CHECK (required_authority = 'operator_gate'),
+  checklist_items_json TEXT NOT NULL CHECK (json_valid(checklist_items_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  status TEXT NOT NULL CHECK (status IN ('queued','verified','failed','blocked')),
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS recovery_checklist_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  drill_id TEXT NOT NULL REFERENCES restore_drill_packets(drill_id),
+  operator_id TEXT NOT NULL,
+  checklist_results_json TEXT NOT NULL CHECK (json_valid(checklist_results_json)),
+  receipt_ref TEXT NOT NULL,
+  receipt_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('accepted','rejected')),
+  notes TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS recovery_verification_states (
+  verification_id TEXT PRIMARY KEY,
+  drill_id TEXT NOT NULL UNIQUE REFERENCES restore_drill_packets(drill_id),
+  cadence_id TEXT NOT NULL REFERENCES backup_cadence_records(cadence_id),
+  receipt_id TEXT REFERENCES recovery_checklist_receipts(receipt_id),
+  backup_manifest_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('verified','failed','blocked')),
+  fail_closed INTEGER NOT NULL CHECK (fail_closed IN (0, 1)),
+  verification_checks_json TEXT NOT NULL CHECK (json_valid(verification_checks_json)),
+  mismatch_summary_json TEXT NOT NULL CHECK (json_valid(mismatch_summary_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  verified_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS recovery_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  drill_id TEXT NOT NULL REFERENCES restore_drill_packets(drill_id),
+  replay_cadence_json TEXT NOT NULL CHECK (json_valid(replay_cadence_json)),
+  projection_cadence_json TEXT NOT NULL CHECK (json_valid(projection_cadence_json)),
+  replay_drill_packet_json TEXT NOT NULL CHECK (json_valid(replay_drill_packet_json)),
+  projection_drill_packet_json TEXT NOT NULL CHECK (json_valid(projection_drill_packet_json)),
+  replay_checklist_receipts_json TEXT NOT NULL CHECK (json_valid(replay_checklist_receipts_json)),
+  projection_checklist_receipts_json TEXT NOT NULL CHECK (json_valid(projection_checklist_receipts_json)),
+  replay_verification_state_json TEXT NOT NULL CHECK (json_valid(replay_verification_state_json)),
+  projection_verification_state_json TEXT NOT NULL CHECK (json_valid(projection_verification_state_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS side_effect_intents (
   intent_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -951,6 +1023,11 @@ CREATE INDEX IF NOT EXISTS idx_artifact_payload_metadata_artifact ON artifact_pa
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_due ON artifact_lifecycle_task_packets(status, action, due_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_artifact ON artifact_lifecycle_task_packets(artifact_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_replay_projection_artifact ON artifact_lifecycle_replay_projection_comparisons(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_cadence_records_status_due ON backup_cadence_records(status, next_due_at);
+CREATE INDEX IF NOT EXISTS idx_restore_drill_packets_cadence ON restore_drill_packets(cadence_id, status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_recovery_checklist_receipts_drill ON recovery_checklist_receipts(drill_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_recovery_verification_states_status ON recovery_verification_states(status, fail_closed, verified_at);
+CREATE INDEX IF NOT EXISTS idx_recovery_replay_projection_drill ON recovery_replay_projection_comparisons(drill_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_side_effect_intents_status ON side_effect_intents(status, side_effect_type);
 CREATE INDEX IF NOT EXISTS idx_side_effect_receipts_intent ON side_effect_receipts(intent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_projection_outbox_status ON projection_outbox(status, created_at);
