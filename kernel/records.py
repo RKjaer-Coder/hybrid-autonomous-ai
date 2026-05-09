@@ -18,6 +18,13 @@ ArtifactGovernanceStatus = Literal["recorded", "applied", "blocked"]
 ArtifactPayloadStatus = Literal["active", "quarantined", "deletion_due", "deleted", "crypto_shredded"]
 ArtifactLifecycleTaskAction = Literal["quarantine", "delete", "crypto_shred"]
 ArtifactLifecycleTaskStatus = Literal["queued", "completed", "blocked"]
+EncryptedStorageScope = Literal["artifact_payload", "backup_payload"]
+EncryptedStorageDescriptorStatus = Literal["active", "quarantined", "rotated", "deleted", "inaccessible"]
+EncryptedStorageKeyStatus = Literal["active", "rotated", "shredded"]
+EncryptedStorageRotationStatus = Literal["applied", "blocked"]
+PayloadAccessOperation = Literal["read", "write"]
+PayloadAccessResult = Literal["allowed", "denied", "blocked"]
+PayloadAccessVerificationStatus = Literal["verified", "failed", "blocked"]
 BackupCadence = Literal["hourly", "daily", "weekly", "monthly"]
 BackupCadenceStatus = Literal["active", "paused", "retired"]
 RestoreDrillStatus = Literal["queued", "verified", "failed", "blocked"]
@@ -355,6 +362,96 @@ class ArtifactLifecycleReplayProjectionComparison:
     projection_payload_metadata: list[JsonObject]
     replay_task_packets: list[JsonObject]
     projection_task_packets: list[JsonObject]
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class EncryptedStorageDescriptor:
+    storage_scope: EncryptedStorageScope
+    owner_ref: str
+    descriptor_uri: str
+    storage_backend: str
+    local_path_ref: str
+    data_class: DataClass
+    ciphertext_hash: str
+    plaintext_hash: str
+    size_bytes: int
+    encryption_algorithm: str
+    key_ref: str
+    key_version: str
+    access_policy: JsonObject
+    retention_policy: str
+    deletion_policy: str
+    evidence_refs: list[str]
+    descriptor_id: str = field(default_factory=new_id)
+    key_status: EncryptedStorageKeyStatus = "active"
+    status: EncryptedStorageDescriptorStatus = "active"
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class EncryptedStorageKeyRotationRecord:
+    descriptor_id: str
+    old_key_ref: str
+    new_key_ref: str
+    old_key_version: str
+    new_key_version: str
+    rotation_reason: str
+    required_authority: Authority
+    evidence_refs: list[str]
+    receipt_ref: str
+    receipt_hash: str
+    status: EncryptedStorageRotationStatus = "applied"
+    rotation_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class PayloadAccessReceipt:
+    descriptor_id: str
+    operation: PayloadAccessOperation
+    subject_type: Literal["kernel", "operator", "agent", "tool", "model", "scheduler"]
+    subject_id: str
+    access_result: PayloadAccessResult
+    verification_status: PayloadAccessVerificationStatus
+    payload_hash: str
+    receipt_ref: str
+    receipt_hash: str
+    evidence_refs: list[str]
+    grant_id: str | None = None
+    details: JsonObject = field(default_factory=dict)
+    receipt_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class EncryptedStorageAccessVerificationState:
+    descriptor_id: str
+    last_receipt_id: str | None
+    status: PayloadAccessVerificationStatus
+    fail_closed: bool
+    verification_checks: JsonObject
+    mismatch_summary: list[str]
+    evidence_refs: list[str]
+    verification_id: str = field(default_factory=new_id)
+    verified_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class EncryptedStorageReplayProjectionComparison:
+    descriptor_id: str
+    replay_descriptor: JsonObject
+    projection_descriptor: JsonObject
+    replay_key_rotations: list[JsonObject]
+    projection_key_rotations: list[JsonObject]
+    replay_access_receipts: list[JsonObject]
+    projection_access_receipts: list[JsonObject]
+    replay_verification_state: JsonObject
+    projection_verification_state: JsonObject
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

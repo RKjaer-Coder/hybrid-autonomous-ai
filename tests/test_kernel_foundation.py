@@ -14,7 +14,11 @@ from kernel import (
     Budget,
     CapabilityGrant,
     Command,
+    EncryptedStorageAccessVerificationState,
+    EncryptedStorageDescriptor,
+    EncryptedStorageKeyRotationRecord,
     KernelStore,
+    PayloadAccessReceipt,
     RecoveryChecklistReceipt,
     RecoveryVerificationState,
     RestoreDrillPacket,
@@ -569,6 +573,251 @@ class KernelFoundationTests(unittest.TestCase):
         )
         self.assertFalse(drift.matches)
         self.assertIn("artifact_payload_metadata", drift.mismatches)
+
+    def test_encrypted_storage_descriptors_key_rotation_and_payload_access_are_replayable(self):
+        artifact = ArtifactRef(
+            artifact_uri="artifact://local/encrypted-payload",
+            data_class="client_confidential",
+            content_hash=sha256_text("plaintext"),
+            retention_policy="retain-30d",
+            deletion_policy="crypto-shred",
+            encryption_status="encrypted",
+        )
+        artifact_id = self.store.execute_command(
+            command("artifact.ref", "encrypted-storage-artifact"),
+            lambda tx: tx.create_artifact_ref(artifact),
+        )
+        descriptor = EncryptedStorageDescriptor(
+            storage_scope="artifact_payload",
+            owner_ref=artifact_id,
+            descriptor_uri="storage://local/artifacts/encrypted-payload",
+            storage_backend="local_encrypted_store",
+            local_path_ref="/var/lib/hai/artifacts/encrypted-payload.ciphertext",
+            data_class="client_confidential",
+            ciphertext_hash=sha256_text("ciphertext-v1"),
+            plaintext_hash=artifact.content_hash,
+            size_bytes=256,
+            encryption_algorithm="xchacha20-poly1305",
+            key_ref="kms://local/artifacts/encrypted-payload/key",
+            key_version="v1",
+            access_policy={"read": ["kernel", "agent:reader"], "write": ["kernel"]},
+            retention_policy=artifact.retention_policy,
+            deletion_policy=artifact.deletion_policy,
+            evidence_refs=[f"kernel:artifact_refs/{artifact_id}"],
+        )
+        descriptor_id = self.store.record_encrypted_storage_descriptor(
+            command("storage.descriptor", "encrypted-storage-descriptor", requested_by="kernel"),
+            descriptor,
+        )
+        rotation = EncryptedStorageKeyRotationRecord(
+            descriptor_id=descriptor_id,
+            old_key_ref=descriptor.key_ref,
+            new_key_ref="kms://local/artifacts/encrypted-payload/key-2",
+            old_key_version="v1",
+            new_key_version="v2",
+            rotation_reason="Scheduled local key-reference rotation.",
+            required_authority="operator_gate",
+            evidence_refs=[f"kernel:encrypted_storage_descriptors/{descriptor_id}"],
+            receipt_ref="kms://local/artifacts/encrypted-payload/key-2/receipt",
+            receipt_hash=sha256_text("rotated"),
+        )
+        self.store.record_encrypted_storage_key_rotation(
+            command("storage.rotate", "encrypted-storage-rotation", requested_authority="operator_gate"),
+            rotation,
+        )
+        grant = CapabilityGrant(
+            task_id=new_id(),
+            subject_type="agent",
+            subject_id="reader",
+            capability_type="file",
+            actions=["read"],
+            resource={"descriptor_id": descriptor_id},
+            scope={"local_path_ref": descriptor.local_path_ref},
+            conditions={"receipt_required": True},
+            expires_at=future(),
+            policy_version=KERNEL_POLICY_VERSION,
+            max_uses=1,
+        )
+        self.store.issue_capability_grant(command("grant.issue", "encrypted-storage-read-grant"), grant)
+        receipt = PayloadAccessReceipt(
+            descriptor_id=descriptor_id,
+            operation="read",
+            subject_type="agent",
+            subject_id="reader",
+            grant_id=grant.grant_id,
+            access_result="allowed",
+            verification_status="verified",
+            payload_hash=descriptor.plaintext_hash,
+            receipt_ref="storage://local/artifacts/encrypted-payload/read-receipt",
+            receipt_hash=sha256_text("read receipt"),
+            evidence_refs=[
+                f"kernel:encrypted_storage_descriptors/{descriptor_id}",
+                f"kernel:capability_grants/{grant.grant_id}",
+            ],
+        )
+        receipt_id = self.store.record_payload_access_receipt(
+            command("storage.access", "encrypted-storage-read", requested_by="agent"),
+            receipt,
+        )
+        verification = EncryptedStorageAccessVerificationState(
+            descriptor_id=descriptor_id,
+            last_receipt_id=receipt_id,
+            status="verified",
+            fail_closed=False,
+            verification_checks={
+                "descriptor_exists": True,
+                "grant_verified": True,
+                "receipt_hash_present": True,
+                "payload_hash_matches": True,
+            },
+            mismatch_summary=[],
+            evidence_refs=[f"kernel:payload_access_receipts/{receipt_id}"],
+        )
+        self.store.record_encrypted_storage_access_verification(
+            command("storage.verify", "encrypted-storage-verify", requested_by="kernel"),
+            verification,
+        )
+
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.encrypted_storage_descriptors[descriptor_id]["key_ref"], rotation.new_key_ref)
+        self.assertEqual(replay.encrypted_storage_descriptors[descriptor_id]["status"], "rotated")
+        self.assertEqual(replay.payload_access_receipts[receipt_id]["access_result"], "allowed")
+        self.assertFalse(
+            replay.encrypted_storage_access_verification_states[verification.verification_id]["fail_closed"]
+        )
+        comparison = self.store.compare_encrypted_storage_replay_to_projection(
+            command("storage.compare", "encrypted-storage-compare", requested_by="kernel"),
+            descriptor_id,
+        )
+        self.assertTrue(comparison.matches)
+
+    def test_encrypted_storage_access_fails_closed_without_grant_or_after_failed_verification(self):
+        descriptor = EncryptedStorageDescriptor(
+            storage_scope="backup_payload",
+            owner_ref="backup://kernel.db/2026-05-09",
+            descriptor_uri="storage://local/backups/kernel-2026-05-09",
+            storage_backend="local_encrypted_store",
+            local_path_ref="/var/lib/hai/backups/kernel-2026-05-09.ciphertext",
+            data_class="internal",
+            ciphertext_hash=sha256_text("backup ciphertext"),
+            plaintext_hash=sha256_text("backup plaintext"),
+            size_bytes=4096,
+            encryption_algorithm="xchacha20-poly1305",
+            key_ref="kms://local/backups/kernel/key",
+            key_version="v1",
+            access_policy={"read": ["agent:backup-reader"], "write": ["kernel"]},
+            retention_policy="retain-30d",
+            deletion_policy="crypto-shred",
+            evidence_refs=["kernel:backup_manifest/kernel-2026-05-09"],
+        )
+        descriptor_id = self.store.record_encrypted_storage_descriptor(
+            command("storage.descriptor", "backup-storage-descriptor", requested_by="kernel"),
+            descriptor,
+        )
+        with self.assertRaises(PermissionError):
+            self.store.record_payload_access_receipt(
+                command("storage.access", "backup-read-without-grant", requested_by="agent"),
+                PayloadAccessReceipt(
+                    descriptor_id=descriptor_id,
+                    operation="read",
+                    subject_type="agent",
+                    subject_id="backup-reader",
+                    access_result="allowed",
+                    verification_status="verified",
+                    payload_hash=descriptor.plaintext_hash,
+                    receipt_ref="storage://local/backups/read-receipt",
+                    receipt_hash=sha256_text("read"),
+                    evidence_refs=[f"kernel:encrypted_storage_descriptors/{descriptor_id}"],
+                ),
+            )
+        failed_receipt = PayloadAccessReceipt(
+            descriptor_id=descriptor_id,
+            operation="read",
+            subject_type="agent",
+            subject_id="backup-reader",
+            access_result="blocked",
+            verification_status="failed",
+            payload_hash=descriptor.plaintext_hash,
+            receipt_ref="storage://local/backups/blocked-read",
+            receipt_hash=sha256_text("blocked"),
+            evidence_refs=[f"kernel:encrypted_storage_descriptors/{descriptor_id}"],
+            details={"reason": "ciphertext hash mismatch"},
+        )
+        failed_receipt_id = self.store.record_payload_access_receipt(
+            command("storage.access", "backup-blocked-read", requested_by="agent"),
+            failed_receipt,
+        )
+        failed_state = EncryptedStorageAccessVerificationState(
+            descriptor_id=descriptor_id,
+            last_receipt_id=failed_receipt_id,
+            status="failed",
+            fail_closed=True,
+            verification_checks={"ciphertext_hash_matches": False, "receipt_hash_present": True},
+            mismatch_summary=["ciphertext_hash_matches"],
+            evidence_refs=[f"kernel:payload_access_receipts/{failed_receipt_id}"],
+        )
+        self.store.record_encrypted_storage_access_verification(
+            command("storage.verify", "backup-failed-verify", requested_by="kernel"),
+            failed_state,
+        )
+        replay = self.store.replay_critical_state()
+        self.assertEqual(replay.encrypted_storage_descriptors[descriptor_id]["status"], "inaccessible")
+        with self.assertRaises(PermissionError):
+            self.store.record_payload_access_receipt(
+                command("storage.access", "backup-read-after-fail", requested_by="operator"),
+                PayloadAccessReceipt(
+                    descriptor_id=descriptor_id,
+                    operation="read",
+                    subject_type="operator",
+                    subject_id="operator",
+                    access_result="allowed",
+                    verification_status="verified",
+                    payload_hash=descriptor.plaintext_hash,
+                    receipt_ref="storage://local/backups/operator-read",
+                    receipt_hash=sha256_text("operator read"),
+                    evidence_refs=[f"kernel:encrypted_storage_descriptors/{descriptor_id}"],
+                ),
+            )
+
+    def test_encrypted_storage_replay_projection_comparison_detects_drift(self):
+        descriptor = EncryptedStorageDescriptor(
+            storage_scope="backup_payload",
+            owner_ref="backup://kernel.db/drift",
+            descriptor_uri="storage://local/backups/drift",
+            storage_backend="local_encrypted_store",
+            local_path_ref="/var/lib/hai/backups/drift.ciphertext",
+            data_class="internal",
+            ciphertext_hash=sha256_text("drift ciphertext"),
+            plaintext_hash=sha256_text("drift plaintext"),
+            size_bytes=128,
+            encryption_algorithm="xchacha20-poly1305",
+            key_ref="kms://local/backups/drift/key",
+            key_version="v1",
+            access_policy={"read": ["kernel"], "write": ["kernel"]},
+            retention_policy="retain-7d",
+            deletion_policy="delete",
+            evidence_refs=["kernel:backup_manifest/drift"],
+        )
+        descriptor_id = self.store.record_encrypted_storage_descriptor(
+            command("storage.descriptor", "storage-drift-descriptor", requested_by="kernel"),
+            descriptor,
+        )
+        comparison = self.store.compare_encrypted_storage_replay_to_projection(
+            command("storage.compare", "storage-drift-clean", requested_by="kernel"),
+            descriptor_id,
+        )
+        self.assertTrue(comparison.matches)
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE encrypted_storage_descriptors SET status='inaccessible' WHERE descriptor_id=?",
+                (descriptor_id,),
+            )
+        drift = self.store.compare_encrypted_storage_replay_to_projection(
+            command("storage.compare", "storage-drift-detected", requested_by="kernel"),
+            descriptor_id,
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("encrypted_storage_descriptors", drift.mismatches)
 
     def test_backup_cadence_restore_drill_and_recovery_verification_are_replayable(self):
         cadence = BackupCadenceRecord(

@@ -18,6 +18,10 @@ from .records import (
     Command,
     CommercialDecisionRecommendationRecord,
     Decision,
+    EncryptedStorageAccessVerificationState,
+    EncryptedStorageDescriptor,
+    EncryptedStorageKeyRotationRecord,
+    EncryptedStorageReplayProjectionComparison,
     EvidenceBundle,
     Event,
     HoldoutPolicy,
@@ -53,6 +57,7 @@ from .records import (
     ProjectStatusRollup,
     ProjectTask,
     ProjectTaskAssignment,
+    PayloadAccessReceipt,
     RecoveryChecklistReceipt,
     RecoveryReplayProjectionComparison,
     RecoveryVerificationState,
@@ -107,6 +112,11 @@ class ReplayState:
     artifact_payload_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_lifecycle_task_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifact_lifecycle_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    encrypted_storage_descriptors: dict[str, dict[str, Any]] = field(default_factory=dict)
+    encrypted_storage_key_rotations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    payload_access_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    encrypted_storage_access_verification_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    encrypted_storage_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     backup_cadence_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     restore_drill_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     recovery_checklist_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -301,6 +311,48 @@ class KernelStore:
     ) -> ArtifactLifecycleReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> ArtifactLifecycleReplayProjectionComparison:
             return tx.compare_artifact_lifecycle_replay_to_projection(artifact_id)
+
+        return self.execute_command(command, handler)
+
+    def record_encrypted_storage_descriptor(self, command: Command, descriptor: EncryptedStorageDescriptor) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_encrypted_storage_descriptor(descriptor)
+
+        return self.execute_command(command, handler)
+
+    def record_encrypted_storage_key_rotation(
+        self,
+        command: Command,
+        rotation: EncryptedStorageKeyRotationRecord,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_encrypted_storage_key_rotation(rotation)
+
+        return self.execute_command(command, handler)
+
+    def record_payload_access_receipt(self, command: Command, receipt: PayloadAccessReceipt) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_payload_access_receipt(receipt)
+
+        return self.execute_command(command, handler)
+
+    def record_encrypted_storage_access_verification(
+        self,
+        command: Command,
+        verification: EncryptedStorageAccessVerificationState,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_encrypted_storage_access_verification(verification)
+
+        return self.execute_command(command, handler)
+
+    def compare_encrypted_storage_replay_to_projection(
+        self,
+        command: Command,
+        descriptor_id: str,
+    ) -> EncryptedStorageReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> EncryptedStorageReplayProjectionComparison:
+            return tx.compare_encrypted_storage_replay_to_projection(descriptor_id)
 
         return self.execute_command(command, handler)
 
@@ -1041,6 +1093,31 @@ class KernelStore:
                 metadata["updated_at"] = payload["completed_at"]
         elif event_type == "artifact_lifecycle_replay_projection_compared":
             state.artifact_lifecycle_replay_projection_comparisons[entity_id] = dict(payload)
+        elif event_type == "encrypted_storage_descriptor_recorded":
+            state.encrypted_storage_descriptors[entity_id] = dict(payload)
+        elif event_type == "encrypted_storage_key_rotated":
+            state.encrypted_storage_key_rotations[entity_id] = dict(payload)
+            descriptor = state.encrypted_storage_descriptors.get(payload["descriptor_id"])
+            if descriptor is not None and payload["status"] == "applied":
+                descriptor["key_ref"] = payload["new_key_ref"]
+                descriptor["key_version"] = payload["new_key_version"]
+                descriptor["key_status"] = "rotated"
+                descriptor["status"] = "rotated"
+                descriptor["updated_at"] = payload["created_at"]
+        elif event_type == "payload_access_receipt_recorded":
+            state.payload_access_receipts[entity_id] = dict(payload)
+            descriptor = state.encrypted_storage_descriptors.get(payload["descriptor_id"])
+            if descriptor is not None and payload["verification_status"] in {"failed", "blocked"}:
+                descriptor["status"] = "inaccessible"
+                descriptor["updated_at"] = payload["created_at"]
+        elif event_type == "encrypted_storage_access_verification_recorded":
+            state.encrypted_storage_access_verification_states[entity_id] = dict(payload)
+            descriptor = state.encrypted_storage_descriptors.get(payload["descriptor_id"])
+            if descriptor is not None and payload["fail_closed"]:
+                descriptor["status"] = "inaccessible"
+                descriptor["updated_at"] = payload["verified_at"]
+        elif event_type == "encrypted_storage_replay_projection_compared":
+            state.encrypted_storage_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "backup_cadence_recorded":
             state.backup_cadence_records[entity_id] = dict(payload)
         elif event_type == "restore_drill_packet_created":
@@ -1938,6 +2015,456 @@ class KernelTransaction:
             ),
         )
         self.enqueue_projection(event_id, "artifact_lifecycle_replay_projection_comparison_projection")
+        return comparison
+
+    def record_encrypted_storage_descriptor(self, descriptor: EncryptedStorageDescriptor) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("encrypted storage descriptors are kernel-owned")
+        if descriptor.storage_scope not in {"artifact_payload", "backup_payload"}:
+            raise ValueError("unknown encrypted storage scope")
+        if not descriptor.descriptor_uri.strip() or not descriptor.local_path_ref.strip():
+            raise ValueError("encrypted storage descriptors require URI and local path references")
+        if not descriptor.ciphertext_hash.strip() or not descriptor.plaintext_hash.strip():
+            raise ValueError("encrypted storage descriptors require ciphertext and plaintext hashes")
+        if descriptor.size_bytes < 0:
+            raise ValueError("encrypted storage descriptor size must be non-negative")
+        if not descriptor.key_ref.strip() or not descriptor.key_version.strip():
+            raise ValueError("encrypted storage descriptors require key references")
+        if descriptor.storage_scope == "artifact_payload":
+            artifact = self.conn.execute(
+                "SELECT data_class, retention_policy, deletion_policy FROM artifact_refs WHERE artifact_id=?",
+                (descriptor.owner_ref,),
+            ).fetchone()
+            if artifact is None:
+                raise ValueError("artifact payload storage descriptors require an existing artifact ref owner")
+            if descriptor.data_class != artifact["data_class"]:
+                raise ValueError("encrypted storage descriptor data class must match ArtifactRef")
+            if descriptor.retention_policy != artifact["retention_policy"]:
+                raise ValueError("encrypted storage descriptor retention policy must match ArtifactRef")
+            if descriptor.deletion_policy != artifact["deletion_policy"]:
+                raise ValueError("encrypted storage descriptor deletion policy must match ArtifactRef")
+        sensitive = descriptor.data_class in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+        if sensitive and not descriptor.encryption_algorithm.strip():
+            raise PermissionError("sensitive encrypted storage descriptors require an encryption algorithm")
+        if not descriptor.evidence_refs:
+            raise ValueError("encrypted storage descriptors require evidence references")
+        payload = _encrypted_storage_descriptor_payload(descriptor)
+        event_id = self.append_event(
+            "encrypted_storage_descriptor_recorded",
+            "artifact",
+            descriptor.descriptor_id,
+            payload,
+            descriptor.data_class,
+        )
+        self.conn.execute(
+            """
+            INSERT INTO encrypted_storage_descriptors (
+              descriptor_id, storage_scope, owner_ref, descriptor_uri, storage_backend,
+              local_path_ref, data_class, ciphertext_hash, plaintext_hash, size_bytes,
+              encryption_algorithm, key_ref, key_version, key_status, access_policy_json,
+              retention_policy, deletion_policy, evidence_refs_json, status, created_at,
+              updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                descriptor.descriptor_id,
+                descriptor.storage_scope,
+                descriptor.owner_ref,
+                descriptor.descriptor_uri,
+                descriptor.storage_backend,
+                descriptor.local_path_ref,
+                descriptor.data_class,
+                descriptor.ciphertext_hash,
+                descriptor.plaintext_hash,
+                descriptor.size_bytes,
+                descriptor.encryption_algorithm,
+                descriptor.key_ref,
+                descriptor.key_version,
+                descriptor.key_status,
+                canonical_json(descriptor.access_policy),
+                descriptor.retention_policy,
+                descriptor.deletion_policy,
+                canonical_json(descriptor.evidence_refs),
+                descriptor.status,
+                descriptor.created_at,
+                descriptor.updated_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "encrypted_storage_descriptor_projection")
+        return descriptor.descriptor_id
+
+    def record_encrypted_storage_key_rotation(self, rotation: EncryptedStorageKeyRotationRecord) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("workers cannot rotate encrypted storage key references")
+        if not rotation.receipt_ref.strip() or not rotation.receipt_hash.strip():
+            raise ValueError("encrypted storage key rotations require durable receipt references")
+        if not rotation.evidence_refs:
+            raise ValueError("encrypted storage key rotations require evidence references")
+        descriptor = self.conn.execute(
+            "SELECT * FROM encrypted_storage_descriptors WHERE descriptor_id=?",
+            (rotation.descriptor_id,),
+        ).fetchone()
+        if descriptor is None:
+            raise ValueError("encrypted storage key rotation requires an existing descriptor")
+        if descriptor["key_ref"] != rotation.old_key_ref or descriptor["key_version"] != rotation.old_key_version:
+            raise ValueError("encrypted storage key rotation must start from the current key reference")
+        sensitive = descriptor["data_class"] in {"sensitive", "secret_ref", "regulated", "client_confidential"}
+        if sensitive and (
+            self.command.requested_by != "operator"
+            or self.command.requested_authority != "operator_gate"
+            or rotation.required_authority != "operator_gate"
+        ):
+            raise PermissionError("sensitive encrypted storage key rotation requires operator-gate authority")
+        payload = _encrypted_storage_key_rotation_payload(rotation)
+        event_id = self.append_event(
+            "encrypted_storage_key_rotated",
+            "artifact",
+            rotation.rotation_id,
+            payload,
+            descriptor["data_class"],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO encrypted_storage_key_rotations (
+              rotation_id, descriptor_id, old_key_ref, new_key_ref, old_key_version,
+              new_key_version, rotation_reason, required_authority, evidence_refs_json,
+              receipt_ref, receipt_hash, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                rotation.rotation_id,
+                rotation.descriptor_id,
+                rotation.old_key_ref,
+                rotation.new_key_ref,
+                rotation.old_key_version,
+                rotation.new_key_version,
+                rotation.rotation_reason,
+                rotation.required_authority,
+                canonical_json(rotation.evidence_refs),
+                rotation.receipt_ref,
+                rotation.receipt_hash,
+                rotation.status,
+                rotation.created_at,
+            ),
+        )
+        if rotation.status == "applied":
+            self.conn.execute(
+                """
+                UPDATE encrypted_storage_descriptors
+                SET key_ref=?, key_version=?, key_status='rotated', status='rotated', updated_at=?
+                WHERE descriptor_id=?
+                """,
+                (rotation.new_key_ref, rotation.new_key_version, rotation.created_at, rotation.descriptor_id),
+            )
+        self.enqueue_projection(event_id, "encrypted_storage_key_rotation_projection")
+        return rotation.rotation_id
+
+    def record_payload_access_receipt(self, receipt: PayloadAccessReceipt) -> str:
+        descriptor = self.conn.execute(
+            "SELECT * FROM encrypted_storage_descriptors WHERE descriptor_id=?",
+            (receipt.descriptor_id,),
+        ).fetchone()
+        if descriptor is None:
+            raise ValueError("payload access receipts require an existing encrypted storage descriptor")
+        if not receipt.receipt_ref.strip() or not receipt.receipt_hash.strip():
+            raise ValueError("payload access receipts require durable receipt references")
+        if not receipt.evidence_refs:
+            raise ValueError("payload access receipts require evidence references")
+        if receipt.access_result == "allowed":
+            if receipt.verification_status != "verified":
+                raise PermissionError("payload access fails closed unless verification is verified")
+            if descriptor["status"] not in {"active", "rotated"}:
+                raise PermissionError("payload access fails closed for inactive encrypted storage descriptors")
+            self._assert_payload_access_grant(receipt, descriptor)
+        payload = _payload_access_receipt_payload(receipt)
+        event_id = self.append_event(
+            "payload_access_receipt_recorded",
+            "artifact",
+            receipt.receipt_id,
+            payload,
+            descriptor["data_class"],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO payload_access_receipts (
+              receipt_id, descriptor_id, operation, subject_type, subject_id,
+              grant_id, access_result, verification_status, payload_hash,
+              receipt_ref, receipt_hash, evidence_refs_json, details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                receipt.receipt_id,
+                receipt.descriptor_id,
+                receipt.operation,
+                receipt.subject_type,
+                receipt.subject_id,
+                receipt.grant_id,
+                receipt.access_result,
+                receipt.verification_status,
+                receipt.payload_hash,
+                receipt.receipt_ref,
+                receipt.receipt_hash,
+                canonical_json(receipt.evidence_refs),
+                canonical_json(receipt.details),
+                receipt.created_at,
+            ),
+        )
+        if receipt.verification_status in {"failed", "blocked"}:
+            self.conn.execute(
+                "UPDATE encrypted_storage_descriptors SET status='inaccessible', updated_at=? WHERE descriptor_id=?",
+                (receipt.created_at, receipt.descriptor_id),
+            )
+        if receipt.access_result == "allowed" and receipt.grant_id and receipt.subject_type not in {"kernel", "operator"}:
+            self._record_payload_access_grant_use(receipt)
+        self.enqueue_projection(event_id, "payload_access_receipt_projection")
+        return receipt.receipt_id
+
+    def _assert_payload_access_grant(self, receipt: PayloadAccessReceipt, descriptor: sqlite3.Row) -> None:
+        access_policy = _loads(descriptor["access_policy_json"])
+        allowed_subjects = set(access_policy.get(receipt.operation, []))
+        subject_refs = {receipt.subject_type, f"{receipt.subject_type}:{receipt.subject_id}"}
+        policy_allows = "*" in allowed_subjects or bool(allowed_subjects & subject_refs)
+        if not policy_allows:
+            raise PermissionError("payload access subject is not allowed by encrypted storage policy")
+        if receipt.subject_type in {"kernel", "operator"}:
+            return
+        if not receipt.grant_id:
+            raise PermissionError("worker payload access requires a live file capability grant")
+        grant = self.conn.execute(
+            "SELECT * FROM capability_grants WHERE grant_id=?",
+            (receipt.grant_id,),
+        ).fetchone()
+        if grant is None:
+            raise PermissionError("payload access grant not found")
+        actions = set(_loads(grant["actions_json"]))
+        resource = _loads(grant["resource_json"])
+        stale_policy = grant["revalidate_on_use"] and grant["policy_version"] != KERNEL_POLICY_VERSION
+        exhausted = grant["max_uses"] is not None and grant["used_count"] >= grant["max_uses"]
+        expired = grant["expires_at"] <= now_iso()
+        valid = (
+            grant["status"] == "active"
+            and grant["subject_type"] == receipt.subject_type
+            and grant["subject_id"] == receipt.subject_id
+            and grant["capability_type"] == "file"
+            and receipt.operation in actions
+            and resource.get("descriptor_id") == receipt.descriptor_id
+            and not stale_policy
+            and not exhausted
+            and not expired
+        )
+        if not valid:
+            raise PermissionError("payload access fails closed without a valid file capability grant")
+
+    def _record_payload_access_grant_use(self, receipt: PayloadAccessReceipt) -> None:
+        grant = self.conn.execute(
+            "SELECT * FROM capability_grants WHERE grant_id=?",
+            (receipt.grant_id,),
+        ).fetchone()
+        if grant is None:
+            raise PermissionError("payload access grant not found")
+        event_id = self.append_event(
+            "capability_used",
+            "capability",
+            receipt.grant_id or "",
+            {
+                "grant_id": receipt.grant_id,
+                "subject_type": receipt.subject_type,
+                "subject_id": receipt.subject_id,
+                "capability_type": "file",
+                "action": receipt.operation,
+                "used_at": now_iso(),
+                "receipt_id": receipt.receipt_id,
+                "descriptor_id": receipt.descriptor_id,
+            },
+        )
+        next_used = grant["used_count"] + 1
+        next_status = "exhausted" if grant["max_uses"] is not None and next_used >= grant["max_uses"] else "active"
+        self.conn.execute(
+            "UPDATE capability_grants SET used_count=?, status=? WHERE grant_id=?",
+            (next_used, next_status, receipt.grant_id),
+        )
+        self.enqueue_projection(event_id, "grant_use_projection")
+
+    def record_encrypted_storage_access_verification(
+        self,
+        verification: EncryptedStorageAccessVerificationState,
+    ) -> str:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("encrypted storage access verification is kernel-owned")
+        descriptor = self.conn.execute(
+            "SELECT data_class FROM encrypted_storage_descriptors WHERE descriptor_id=?",
+            (verification.descriptor_id,),
+        ).fetchone()
+        if descriptor is None:
+            raise ValueError("encrypted storage access verification requires an existing descriptor")
+        if verification.last_receipt_id:
+            receipt = self.conn.execute(
+                "SELECT descriptor_id FROM payload_access_receipts WHERE receipt_id=?",
+                (verification.last_receipt_id,),
+            ).fetchone()
+            if receipt is None or receipt["descriptor_id"] != verification.descriptor_id:
+                raise ValueError("encrypted storage access verification receipt lineage is invalid")
+        all_checks_pass = all(bool(value) for value in verification.verification_checks.values())
+        if verification.status == "verified" and (verification.fail_closed or not all_checks_pass or verification.mismatch_summary):
+            raise PermissionError("verified encrypted storage access state requires passing checks and no fail-closed flag")
+        if verification.status in {"failed", "blocked"} and not verification.fail_closed:
+            raise PermissionError("failed encrypted storage access verification must fail closed")
+        payload = _encrypted_storage_access_verification_payload(verification)
+        event_id = self.append_event(
+            "encrypted_storage_access_verification_recorded",
+            "artifact",
+            verification.verification_id,
+            payload,
+            descriptor["data_class"],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO encrypted_storage_access_verification_states (
+              verification_id, descriptor_id, last_receipt_id, status, fail_closed,
+              verification_checks_json, mismatch_summary_json, evidence_refs_json,
+              verified_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                verification.verification_id,
+                verification.descriptor_id,
+                verification.last_receipt_id,
+                verification.status,
+                1 if verification.fail_closed else 0,
+                canonical_json(verification.verification_checks),
+                canonical_json(verification.mismatch_summary),
+                canonical_json(verification.evidence_refs),
+                verification.verified_at,
+            ),
+        )
+        if verification.fail_closed:
+            self.conn.execute(
+                "UPDATE encrypted_storage_descriptors SET status='inaccessible', updated_at=? WHERE descriptor_id=?",
+                (verification.verified_at, verification.descriptor_id),
+            )
+        self.enqueue_projection(event_id, "encrypted_storage_access_verification_projection")
+        return verification.verification_id
+
+    def compare_encrypted_storage_replay_to_projection(
+        self,
+        descriptor_id: str,
+    ) -> EncryptedStorageReplayProjectionComparison:
+        projection_descriptor = self.conn.execute(
+            "SELECT * FROM encrypted_storage_descriptors WHERE descriptor_id=?",
+            (descriptor_id,),
+        ).fetchone()
+        if projection_descriptor is None:
+            raise ValueError("encrypted storage descriptor not found")
+        replay = KernelStore._replay_from_connection(self.conn)
+        replay_descriptor = replay.encrypted_storage_descriptors.get(descriptor_id, {})
+        projection_descriptor_payload = _encrypted_storage_descriptor_row_payload(projection_descriptor)
+        projection_rotation_rows = self.conn.execute(
+            "SELECT * FROM encrypted_storage_key_rotations WHERE descriptor_id=? ORDER BY rotation_id",
+            (descriptor_id,),
+        ).fetchall()
+        projection_receipt_rows = self.conn.execute(
+            "SELECT * FROM payload_access_receipts WHERE descriptor_id=? ORDER BY receipt_id",
+            (descriptor_id,),
+        ).fetchall()
+        projection_verification = self.conn.execute(
+            """
+            SELECT * FROM encrypted_storage_access_verification_states
+            WHERE descriptor_id=?
+            ORDER BY verified_at DESC, verification_id DESC
+            LIMIT 1
+            """,
+            (descriptor_id,),
+        ).fetchone()
+        replay_key_rotations = sorted(
+            (
+                dict(value)
+                for value in replay.encrypted_storage_key_rotations.values()
+                if value["descriptor_id"] == descriptor_id
+            ),
+            key=lambda item: item["rotation_id"],
+        )
+        replay_access_receipts = sorted(
+            (
+                dict(value)
+                for value in replay.payload_access_receipts.values()
+                if value["descriptor_id"] == descriptor_id
+            ),
+            key=lambda item: item["receipt_id"],
+        )
+        replay_verification_state = sorted(
+            (
+                dict(value)
+                for value in replay.encrypted_storage_access_verification_states.values()
+                if value["descriptor_id"] == descriptor_id
+            ),
+            key=lambda item: (item["verified_at"], item["verification_id"]),
+        )
+        replay_verification_payload = replay_verification_state[-1] if replay_verification_state else {}
+        projection_key_rotations = [_encrypted_storage_key_rotation_row_payload(row) for row in projection_rotation_rows]
+        projection_access_receipts = [_payload_access_receipt_row_payload(row) for row in projection_receipt_rows]
+        projection_verification_payload = (
+            {}
+            if projection_verification is None
+            else _encrypted_storage_access_verification_row_payload(projection_verification)
+        )
+        mismatches: list[str] = []
+        if replay_descriptor != projection_descriptor_payload:
+            mismatches.append("encrypted_storage_descriptors")
+        if replay_key_rotations != projection_key_rotations:
+            mismatches.append("encrypted_storage_key_rotations")
+        if replay_access_receipts != projection_access_receipts:
+            mismatches.append("payload_access_receipts")
+        if replay_verification_payload != projection_verification_payload:
+            mismatches.append("encrypted_storage_access_verification_states")
+        comparison = EncryptedStorageReplayProjectionComparison(
+            descriptor_id=descriptor_id,
+            replay_descriptor=replay_descriptor,
+            projection_descriptor=projection_descriptor_payload,
+            replay_key_rotations=replay_key_rotations,
+            projection_key_rotations=projection_key_rotations,
+            replay_access_receipts=replay_access_receipts,
+            projection_access_receipts=projection_access_receipts,
+            replay_verification_state=replay_verification_payload,
+            projection_verification_state=projection_verification_payload,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _encrypted_storage_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event(
+            "encrypted_storage_replay_projection_compared",
+            "artifact",
+            comparison.comparison_id,
+            payload,
+            projection_descriptor["data_class"],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO encrypted_storage_replay_projection_comparisons (
+              comparison_id, descriptor_id, replay_descriptor_json,
+              projection_descriptor_json, replay_key_rotations_json,
+              projection_key_rotations_json, replay_access_receipts_json,
+              projection_access_receipts_json, replay_verification_state_json,
+              projection_verification_state_json, matches, mismatches_json,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.descriptor_id,
+                canonical_json(comparison.replay_descriptor),
+                canonical_json(comparison.projection_descriptor),
+                canonical_json(comparison.replay_key_rotations),
+                canonical_json(comparison.projection_key_rotations),
+                canonical_json(comparison.replay_access_receipts),
+                canonical_json(comparison.projection_access_receipts),
+                canonical_json(comparison.replay_verification_state),
+                canonical_json(comparison.projection_verification_state),
+                1 if comparison.matches else 0,
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "encrypted_storage_replay_projection_comparison_projection")
         return comparison
 
     def record_backup_cadence(self, record: BackupCadenceRecord) -> str:
@@ -7601,6 +8128,182 @@ def _artifact_lifecycle_replay_projection_comparison_payload(
         "projection_payload_metadata": comparison.projection_payload_metadata,
         "replay_task_packets": comparison.replay_task_packets,
         "projection_task_packets": comparison.projection_task_packets,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
+    }
+
+
+def _encrypted_storage_descriptor_payload(descriptor: EncryptedStorageDescriptor) -> dict[str, Any]:
+    return {
+        "descriptor_id": descriptor.descriptor_id,
+        "storage_scope": descriptor.storage_scope,
+        "owner_ref": descriptor.owner_ref,
+        "descriptor_uri": descriptor.descriptor_uri,
+        "storage_backend": descriptor.storage_backend,
+        "local_path_ref": descriptor.local_path_ref,
+        "data_class": descriptor.data_class,
+        "ciphertext_hash": descriptor.ciphertext_hash,
+        "plaintext_hash": descriptor.plaintext_hash,
+        "size_bytes": descriptor.size_bytes,
+        "encryption_algorithm": descriptor.encryption_algorithm,
+        "key_ref": descriptor.key_ref,
+        "key_version": descriptor.key_version,
+        "key_status": descriptor.key_status,
+        "access_policy": descriptor.access_policy,
+        "retention_policy": descriptor.retention_policy,
+        "deletion_policy": descriptor.deletion_policy,
+        "evidence_refs": descriptor.evidence_refs,
+        "status": descriptor.status,
+        "created_at": descriptor.created_at,
+        "updated_at": descriptor.updated_at,
+    }
+
+
+def _encrypted_storage_key_rotation_payload(rotation: EncryptedStorageKeyRotationRecord) -> dict[str, Any]:
+    return {
+        "rotation_id": rotation.rotation_id,
+        "descriptor_id": rotation.descriptor_id,
+        "old_key_ref": rotation.old_key_ref,
+        "new_key_ref": rotation.new_key_ref,
+        "old_key_version": rotation.old_key_version,
+        "new_key_version": rotation.new_key_version,
+        "rotation_reason": rotation.rotation_reason,
+        "required_authority": rotation.required_authority,
+        "evidence_refs": rotation.evidence_refs,
+        "receipt_ref": rotation.receipt_ref,
+        "receipt_hash": rotation.receipt_hash,
+        "status": rotation.status,
+        "created_at": rotation.created_at,
+    }
+
+
+def _payload_access_receipt_payload(receipt: PayloadAccessReceipt) -> dict[str, Any]:
+    return {
+        "receipt_id": receipt.receipt_id,
+        "descriptor_id": receipt.descriptor_id,
+        "operation": receipt.operation,
+        "subject_type": receipt.subject_type,
+        "subject_id": receipt.subject_id,
+        "grant_id": receipt.grant_id,
+        "access_result": receipt.access_result,
+        "verification_status": receipt.verification_status,
+        "payload_hash": receipt.payload_hash,
+        "receipt_ref": receipt.receipt_ref,
+        "receipt_hash": receipt.receipt_hash,
+        "evidence_refs": receipt.evidence_refs,
+        "details": receipt.details,
+        "created_at": receipt.created_at,
+    }
+
+
+def _encrypted_storage_access_verification_payload(
+    verification: EncryptedStorageAccessVerificationState,
+) -> dict[str, Any]:
+    return {
+        "verification_id": verification.verification_id,
+        "descriptor_id": verification.descriptor_id,
+        "last_receipt_id": verification.last_receipt_id,
+        "status": verification.status,
+        "fail_closed": verification.fail_closed,
+        "verification_checks": verification.verification_checks,
+        "mismatch_summary": verification.mismatch_summary,
+        "evidence_refs": verification.evidence_refs,
+        "verified_at": verification.verified_at,
+    }
+
+
+def _encrypted_storage_descriptor_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "descriptor_id": row["descriptor_id"],
+        "storage_scope": row["storage_scope"],
+        "owner_ref": row["owner_ref"],
+        "descriptor_uri": row["descriptor_uri"],
+        "storage_backend": row["storage_backend"],
+        "local_path_ref": row["local_path_ref"],
+        "data_class": row["data_class"],
+        "ciphertext_hash": row["ciphertext_hash"],
+        "plaintext_hash": row["plaintext_hash"],
+        "size_bytes": row["size_bytes"],
+        "encryption_algorithm": row["encryption_algorithm"],
+        "key_ref": row["key_ref"],
+        "key_version": row["key_version"],
+        "key_status": row["key_status"],
+        "access_policy": _loads(row["access_policy_json"]),
+        "retention_policy": row["retention_policy"],
+        "deletion_policy": row["deletion_policy"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _encrypted_storage_key_rotation_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "rotation_id": row["rotation_id"],
+        "descriptor_id": row["descriptor_id"],
+        "old_key_ref": row["old_key_ref"],
+        "new_key_ref": row["new_key_ref"],
+        "old_key_version": row["old_key_version"],
+        "new_key_version": row["new_key_version"],
+        "rotation_reason": row["rotation_reason"],
+        "required_authority": row["required_authority"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "receipt_ref": row["receipt_ref"],
+        "receipt_hash": row["receipt_hash"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+    }
+
+
+def _payload_access_receipt_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "receipt_id": row["receipt_id"],
+        "descriptor_id": row["descriptor_id"],
+        "operation": row["operation"],
+        "subject_type": row["subject_type"],
+        "subject_id": row["subject_id"],
+        "grant_id": row["grant_id"],
+        "access_result": row["access_result"],
+        "verification_status": row["verification_status"],
+        "payload_hash": row["payload_hash"],
+        "receipt_ref": row["receipt_ref"],
+        "receipt_hash": row["receipt_hash"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "details": _loads(row["details_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _encrypted_storage_access_verification_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "verification_id": row["verification_id"],
+        "descriptor_id": row["descriptor_id"],
+        "last_receipt_id": row["last_receipt_id"],
+        "status": row["status"],
+        "fail_closed": bool(row["fail_closed"]),
+        "verification_checks": _loads(row["verification_checks_json"]),
+        "mismatch_summary": _loads(row["mismatch_summary_json"]),
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "verified_at": row["verified_at"],
+    }
+
+
+def _encrypted_storage_replay_projection_comparison_payload(
+    comparison: EncryptedStorageReplayProjectionComparison,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "descriptor_id": comparison.descriptor_id,
+        "replay_descriptor": comparison.replay_descriptor,
+        "projection_descriptor": comparison.projection_descriptor,
+        "replay_key_rotations": comparison.replay_key_rotations,
+        "projection_key_rotations": comparison.projection_key_rotations,
+        "replay_access_receipts": comparison.replay_access_receipts,
+        "projection_access_receipts": comparison.projection_access_receipts,
+        "replay_verification_state": comparison.replay_verification_state,
+        "projection_verification_state": comparison.projection_verification_state,
         "matches": comparison.matches,
         "mismatches": comparison.mismatches,
         "created_at": comparison.created_at,

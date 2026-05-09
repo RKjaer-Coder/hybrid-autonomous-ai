@@ -843,6 +843,91 @@ CREATE TABLE IF NOT EXISTS artifact_lifecycle_replay_projection_comparisons (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS encrypted_storage_descriptors (
+  descriptor_id TEXT PRIMARY KEY,
+  storage_scope TEXT NOT NULL CHECK (storage_scope IN ('artifact_payload','backup_payload')),
+  owner_ref TEXT NOT NULL,
+  descriptor_uri TEXT NOT NULL,
+  storage_backend TEXT NOT NULL,
+  local_path_ref TEXT NOT NULL,
+  data_class TEXT NOT NULL CHECK (data_class IN ('public','internal','sensitive','secret_ref','regulated','client_confidential')),
+  ciphertext_hash TEXT NOT NULL,
+  plaintext_hash TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  encryption_algorithm TEXT NOT NULL,
+  key_ref TEXT NOT NULL,
+  key_version TEXT NOT NULL,
+  key_status TEXT NOT NULL CHECK (key_status IN ('active','rotated','shredded')),
+  access_policy_json TEXT NOT NULL CHECK (json_valid(access_policy_json)),
+  retention_policy TEXT NOT NULL,
+  deletion_policy TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  status TEXT NOT NULL CHECK (status IN ('active','quarantined','rotated','deleted','inaccessible')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS encrypted_storage_key_rotations (
+  rotation_id TEXT PRIMARY KEY,
+  descriptor_id TEXT NOT NULL REFERENCES encrypted_storage_descriptors(descriptor_id),
+  old_key_ref TEXT NOT NULL,
+  new_key_ref TEXT NOT NULL,
+  old_key_version TEXT NOT NULL,
+  new_key_version TEXT NOT NULL,
+  rotation_reason TEXT NOT NULL,
+  required_authority TEXT NOT NULL CHECK (required_authority IN ('rule','single_agent','council','operator_gate')),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  receipt_ref TEXT NOT NULL,
+  receipt_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('applied','blocked')),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS payload_access_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  descriptor_id TEXT NOT NULL REFERENCES encrypted_storage_descriptors(descriptor_id),
+  operation TEXT NOT NULL CHECK (operation IN ('read','write')),
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('kernel','operator','agent','tool','model','scheduler')),
+  subject_id TEXT NOT NULL,
+  grant_id TEXT REFERENCES capability_grants(grant_id),
+  access_result TEXT NOT NULL CHECK (access_result IN ('allowed','denied','blocked')),
+  verification_status TEXT NOT NULL CHECK (verification_status IN ('verified','failed','blocked')),
+  payload_hash TEXT NOT NULL,
+  receipt_ref TEXT NOT NULL,
+  receipt_hash TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  details_json TEXT NOT NULL CHECK (json_valid(details_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS encrypted_storage_access_verification_states (
+  verification_id TEXT PRIMARY KEY,
+  descriptor_id TEXT NOT NULL REFERENCES encrypted_storage_descriptors(descriptor_id),
+  last_receipt_id TEXT REFERENCES payload_access_receipts(receipt_id),
+  status TEXT NOT NULL CHECK (status IN ('verified','failed','blocked')),
+  fail_closed INTEGER NOT NULL CHECK (fail_closed IN (0, 1)),
+  verification_checks_json TEXT NOT NULL CHECK (json_valid(verification_checks_json)),
+  mismatch_summary_json TEXT NOT NULL CHECK (json_valid(mismatch_summary_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  verified_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS encrypted_storage_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  descriptor_id TEXT NOT NULL REFERENCES encrypted_storage_descriptors(descriptor_id),
+  replay_descriptor_json TEXT NOT NULL CHECK (json_valid(replay_descriptor_json)),
+  projection_descriptor_json TEXT NOT NULL CHECK (json_valid(projection_descriptor_json)),
+  replay_key_rotations_json TEXT NOT NULL CHECK (json_valid(replay_key_rotations_json)),
+  projection_key_rotations_json TEXT NOT NULL CHECK (json_valid(projection_key_rotations_json)),
+  replay_access_receipts_json TEXT NOT NULL CHECK (json_valid(replay_access_receipts_json)),
+  projection_access_receipts_json TEXT NOT NULL CHECK (json_valid(projection_access_receipts_json)),
+  replay_verification_state_json TEXT NOT NULL CHECK (json_valid(replay_verification_state_json)),
+  projection_verification_state_json TEXT NOT NULL CHECK (json_valid(projection_verification_state_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS backup_cadence_records (
   cadence_id TEXT PRIMARY KEY,
   scope TEXT NOT NULL,
@@ -1023,6 +1108,11 @@ CREATE INDEX IF NOT EXISTS idx_artifact_payload_metadata_artifact ON artifact_pa
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_due ON artifact_lifecycle_task_packets(status, action, due_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_task_packets_artifact ON artifact_lifecycle_task_packets(artifact_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_lifecycle_replay_projection_artifact ON artifact_lifecycle_replay_projection_comparisons(artifact_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_encrypted_storage_descriptors_owner ON encrypted_storage_descriptors(storage_scope, owner_ref, status);
+CREATE INDEX IF NOT EXISTS idx_encrypted_storage_key_rotations_descriptor ON encrypted_storage_key_rotations(descriptor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_payload_access_receipts_descriptor ON payload_access_receipts(descriptor_id, operation, created_at);
+CREATE INDEX IF NOT EXISTS idx_encrypted_storage_access_verification_descriptor ON encrypted_storage_access_verification_states(descriptor_id, status, verified_at);
+CREATE INDEX IF NOT EXISTS idx_encrypted_storage_replay_projection_descriptor ON encrypted_storage_replay_projection_comparisons(descriptor_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_cadence_records_status_due ON backup_cadence_records(status, next_due_at);
 CREATE INDEX IF NOT EXISTS idx_restore_drill_packets_cadence ON restore_drill_packets(cadence_id, status, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_recovery_checklist_receipts_drill ON recovery_checklist_receipts(drill_id, status, created_at);
