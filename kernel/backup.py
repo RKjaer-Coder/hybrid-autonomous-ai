@@ -22,6 +22,10 @@ GOVERNED_TABLES = {
     "restore_drill_packets",
     "recovery_checklist_receipts",
     "recovery_verification_states",
+    "recovery_readiness_packets",
+    "encrypted_storage_descriptors",
+    "payload_access_receipts",
+    "encrypted_storage_access_verification_states",
 }
 
 

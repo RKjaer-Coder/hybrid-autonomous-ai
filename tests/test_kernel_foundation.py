@@ -967,6 +967,159 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertTrue(replay.recovery_verification_states[failed.verification_id]["fail_closed"])
         self.assertEqual(replay.restore_drill_packets[packet.drill_id]["status"], "failed")
 
+    def test_recovery_readiness_packets_summarize_storage_health_and_compare_replay(self):
+        cadence = BackupCadenceRecord(
+            scope="kernel.db",
+            cadence="daily",
+            backup_target="artifact://local/encrypted-kernel-backups",
+            encryption_required=True,
+            retention_policy="retain-30d",
+            recovery_point_objective="24h",
+            next_due_at="2026-05-11T00:00:00Z",
+            evidence_refs=["spec:s08_operator_deployment"],
+        )
+        self.store.record_backup_cadence(command("backup.cadence", "readiness-cadence", requested_by="kernel"), cadence)
+        drill = RestoreDrillPacket(
+            cadence_id=cadence.cadence_id,
+            backup_ref="artifact://local/encrypted-kernel-backups/kernel-2026-05-09",
+            backup_manifest_hash=sha256_text("readiness manifest"),
+            drill_scope="kernel.db restore into isolated verification path",
+            scheduled_for="2026-05-09T01:00:00Z",
+            checklist_items=[{"id": "schema", "label": "Verify schema fidelity"}],
+            evidence_refs=[f"kernel:backup_cadence_records/{cadence.cadence_id}"],
+        )
+        self.store.create_restore_drill_packet(command("backup.drill", "readiness-drill", requested_by="scheduler"), drill)
+        checklist = RecoveryChecklistReceipt(
+            drill_id=drill.drill_id,
+            operator_id="operator",
+            checklist_results=[{"id": "schema", "status": "pass"}],
+            receipt_ref="artifact://local/recovery-drills/readiness-receipt",
+            receipt_hash=sha256_text("readiness receipt"),
+            status="accepted",
+        )
+        self.store.record_recovery_checklist_receipt(
+            command(
+                "backup.recovery_receipt",
+                "readiness-checklist",
+                requested_authority="operator_gate",
+            ),
+            checklist,
+        )
+        self.store.record_recovery_verification_state(
+            command("backup.recovery_verify", "readiness-recovery-verified", requested_by="kernel"),
+            RecoveryVerificationState(
+                drill_id=drill.drill_id,
+                cadence_id=cadence.cadence_id,
+                receipt_id=checklist.receipt_id,
+                backup_manifest_hash=drill.backup_manifest_hash,
+                status="verified",
+                fail_closed=False,
+                verification_checks={"schema_fidelity": True, "event_hash_chain": True},
+                mismatch_summary=[],
+                evidence_refs=[
+                    f"kernel:restore_drill_packets/{drill.drill_id}",
+                    f"kernel:recovery_checklist_receipts/{checklist.receipt_id}",
+                ],
+            ),
+        )
+        descriptor = EncryptedStorageDescriptor(
+            storage_scope="backup_payload",
+            owner_ref=drill.backup_ref,
+            descriptor_uri="storage://local/backups/kernel-readiness",
+            storage_backend="local_encrypted_store",
+            local_path_ref="/var/lib/hai/backups/kernel-readiness.ciphertext",
+            data_class="internal",
+            ciphertext_hash=sha256_text("readiness ciphertext"),
+            plaintext_hash=sha256_text("readiness plaintext"),
+            size_bytes=4096,
+            encryption_algorithm="xchacha20-poly1305",
+            key_ref="kms://local/backups/kernel-readiness/key",
+            key_version="v1",
+            access_policy={"read": ["kernel"], "write": ["kernel"]},
+            retention_policy="retain-30d",
+            deletion_policy="crypto-shred",
+            evidence_refs=[f"kernel:restore_drill_packets/{drill.drill_id}"],
+        )
+        descriptor_id = self.store.record_encrypted_storage_descriptor(
+            command("storage.descriptor", "readiness-backup-descriptor", requested_by="kernel"),
+            descriptor,
+        )
+
+        ready = self.store.create_recovery_readiness_packet(
+            command("recovery.readiness", "readiness-ready", requested_by="kernel"),
+            scope="kernel.db",
+            as_of="2026-05-10T00:00:00Z",
+        )
+        self.assertEqual(ready.readiness_status, "ready")
+        self.assertFalse(ready.live_controls_enabled)
+        self.assertEqual(ready.backup_cadence_summary["active"], 1)
+        self.assertEqual(ready.restore_drill_summary["latest_drill_status"], "verified")
+        self.assertEqual(ready.encrypted_payload_descriptor_summary["backup_payload_descriptor_count"], 1)
+        self.assertEqual(ready.next_operator_actions, [])
+        comparison = self.store.compare_recovery_readiness_replay_to_projection(
+            command("recovery.readiness_compare", "readiness-compare", requested_by="kernel"),
+            ready.packet_id,
+        )
+        self.assertTrue(comparison.matches)
+
+        failed_receipt = PayloadAccessReceipt(
+            descriptor_id=descriptor_id,
+            operation="read",
+            subject_type="agent",
+            subject_id="backup-reader",
+            access_result="blocked",
+            verification_status="failed",
+            payload_hash=descriptor.plaintext_hash,
+            receipt_ref="storage://local/backups/kernel-readiness/blocked-read",
+            receipt_hash=sha256_text("readiness blocked read"),
+            evidence_refs=[f"kernel:encrypted_storage_descriptors/{descriptor_id}"],
+            details={"reason": "ciphertext hash mismatch"},
+        )
+        failed_receipt_id = self.store.record_payload_access_receipt(
+            command("storage.access", "readiness-blocked-read", requested_by="agent"),
+            failed_receipt,
+        )
+        self.store.record_encrypted_storage_access_verification(
+            command("storage.verify", "readiness-storage-failed", requested_by="kernel"),
+            EncryptedStorageAccessVerificationState(
+                descriptor_id=descriptor_id,
+                last_receipt_id=failed_receipt_id,
+                status="failed",
+                fail_closed=True,
+                verification_checks={"ciphertext_hash_matches": False},
+                mismatch_summary=["ciphertext_hash_matches"],
+                evidence_refs=[f"kernel:payload_access_receipts/{failed_receipt_id}"],
+            ),
+        )
+        fail_closed = self.store.create_recovery_readiness_packet(
+            command("recovery.readiness", "readiness-fail-closed", requested_by="kernel"),
+            scope="kernel.db",
+            as_of="2026-05-10T00:00:00Z",
+        )
+        self.assertEqual(fail_closed.readiness_status, "fail_closed")
+        self.assertTrue(fail_closed.fail_closed_state["fail_closed"])
+        self.assertEqual(fail_closed.payload_access_failure_summary["failed_receipt_ids"], [failed_receipt_id])
+        self.assertIn("investigate_encrypted_payload_access", [item["action"] for item in fail_closed.next_operator_actions])
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE recovery_readiness_packets SET readiness_status='ready' WHERE packet_id=?",
+                (fail_closed.packet_id,),
+            )
+        drift = self.store.compare_recovery_readiness_replay_to_projection(
+            command("recovery.readiness_compare", "readiness-drift", requested_by="kernel"),
+            fail_closed.packet_id,
+        )
+        self.assertFalse(drift.matches)
+        self.assertIn("recovery_readiness_packets", drift.mismatches)
+
+    def test_recovery_readiness_packets_are_kernel_owned_and_read_only(self):
+        with self.assertRaises(PermissionError):
+            self.store.create_recovery_readiness_packet(
+                command("recovery.readiness", "agent-readiness", requested_by="agent"),
+                scope="kernel.db",
+                as_of="2026-05-10T00:00:00Z",
+            )
+
     def test_kernel_backup_manifest_and_restore_preserve_audit_and_governed_records(self):
         grant = CapabilityGrant(
             grant_id=new_id(),
@@ -1153,6 +1306,8 @@ class KernelFoundationTests(unittest.TestCase):
         self.assertIn("recovery_checklist_receipts", tables)
         self.assertIn("recovery_verification_states", tables)
         self.assertIn("recovery_replay_projection_comparisons", tables)
+        self.assertIn("recovery_readiness_packets", tables)
+        self.assertIn("recovery_readiness_replay_projection_comparisons", tables)
         self.assertNotIn("research_tasks", tables)
 
     def test_schema_contains_authoritative_placeholders(self):

@@ -1000,6 +1000,32 @@ CREATE TABLE IF NOT EXISTS recovery_replay_projection_comparisons (
   created_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS recovery_readiness_packets (
+  packet_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  backup_cadence_summary_json TEXT NOT NULL CHECK (json_valid(backup_cadence_summary_json)),
+  restore_drill_summary_json TEXT NOT NULL CHECK (json_valid(restore_drill_summary_json)),
+  encrypted_payload_descriptor_summary_json TEXT NOT NULL CHECK (json_valid(encrypted_payload_descriptor_summary_json)),
+  payload_access_failure_summary_json TEXT NOT NULL CHECK (json_valid(payload_access_failure_summary_json)),
+  fail_closed_state_json TEXT NOT NULL CHECK (json_valid(fail_closed_state_json)),
+  next_operator_actions_json TEXT NOT NULL CHECK (json_valid(next_operator_actions_json)),
+  readiness_status TEXT NOT NULL CHECK (readiness_status IN ('ready','action_required','fail_closed')),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  live_controls_enabled INTEGER NOT NULL CHECK (live_controls_enabled = 0),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS recovery_readiness_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  packet_id TEXT NOT NULL REFERENCES recovery_readiness_packets(packet_id),
+  replay_packet_json TEXT NOT NULL CHECK (json_valid(replay_packet_json)),
+  projection_packet_json TEXT NOT NULL CHECK (json_valid(projection_packet_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS side_effect_intents (
   intent_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -1118,6 +1144,8 @@ CREATE INDEX IF NOT EXISTS idx_restore_drill_packets_cadence ON restore_drill_pa
 CREATE INDEX IF NOT EXISTS idx_recovery_checklist_receipts_drill ON recovery_checklist_receipts(drill_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_recovery_verification_states_status ON recovery_verification_states(status, fail_closed, verified_at);
 CREATE INDEX IF NOT EXISTS idx_recovery_replay_projection_drill ON recovery_replay_projection_comparisons(drill_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_recovery_readiness_packets_scope_status ON recovery_readiness_packets(scope, readiness_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_recovery_readiness_replay_projection_packet ON recovery_readiness_replay_projection_comparisons(packet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_side_effect_intents_status ON side_effect_intents(status, side_effect_type);
 CREATE INDEX IF NOT EXISTS idx_side_effect_receipts_intent ON side_effect_receipts(intent_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_projection_outbox_status ON projection_outbox(status, created_at);

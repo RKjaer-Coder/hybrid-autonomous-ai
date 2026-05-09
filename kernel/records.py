@@ -30,6 +30,7 @@ BackupCadenceStatus = Literal["active", "paused", "retired"]
 RestoreDrillStatus = Literal["queued", "verified", "failed", "blocked"]
 RecoveryChecklistStatus = Literal["accepted", "rejected"]
 RecoveryVerificationStatus = Literal["verified", "failed", "blocked"]
+RecoveryReadinessStatus = Literal["ready", "action_required", "fail_closed"]
 RiskLevel = Literal["low", "medium", "high", "critical"]
 AutonomyClass = Literal["A0", "A1", "A2", "A3", "A4", "A5"]
 DecisionType = Literal[
@@ -529,6 +530,34 @@ class RecoveryReplayProjectionComparison:
     projection_checklist_receipts: list[JsonObject]
     replay_verification_state: JsonObject
     projection_verification_state: JsonObject
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class RecoveryReadinessPacket:
+    scope: str
+    as_of: str
+    backup_cadence_summary: JsonObject
+    restore_drill_summary: JsonObject
+    encrypted_payload_descriptor_summary: JsonObject
+    payload_access_failure_summary: JsonObject
+    fail_closed_state: JsonObject
+    next_operator_actions: list[JsonObject]
+    readiness_status: RecoveryReadinessStatus
+    evidence_refs: list[str]
+    live_controls_enabled: bool = False
+    packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class RecoveryReadinessReplayProjectionComparison:
+    packet_id: str
+    replay_packet: JsonObject
+    projection_packet: JsonObject
     matches: bool
     mismatches: list[str]
     comparison_id: str = field(default_factory=new_id)

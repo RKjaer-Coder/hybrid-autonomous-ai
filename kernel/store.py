@@ -59,6 +59,8 @@ from .records import (
     ProjectTaskAssignment,
     PayloadAccessReceipt,
     RecoveryChecklistReceipt,
+    RecoveryReadinessPacket,
+    RecoveryReadinessReplayProjectionComparison,
     RecoveryReplayProjectionComparison,
     RecoveryVerificationState,
     ResearchRequest,
@@ -122,6 +124,8 @@ class ReplayState:
     recovery_checklist_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     recovery_verification_states: dict[str, dict[str, Any]] = field(default_factory=dict)
     recovery_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
+    recovery_readiness_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    recovery_readiness_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     research_requests: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_acquisition_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -391,6 +395,28 @@ class KernelStore:
     ) -> RecoveryReplayProjectionComparison:
         def handler(tx: KernelTransaction) -> RecoveryReplayProjectionComparison:
             return tx.compare_recovery_replay_to_projection(drill_id)
+
+        return self.execute_command(command, handler)
+
+    def create_recovery_readiness_packet(
+        self,
+        command: Command,
+        *,
+        scope: str,
+        as_of: str,
+    ) -> RecoveryReadinessPacket:
+        def handler(tx: KernelTransaction) -> RecoveryReadinessPacket:
+            return tx.create_recovery_readiness_packet(scope=scope, as_of=as_of)
+
+        return self.execute_command(command, handler)
+
+    def compare_recovery_readiness_replay_to_projection(
+        self,
+        command: Command,
+        packet_id: str,
+    ) -> RecoveryReadinessReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> RecoveryReadinessReplayProjectionComparison:
+            return tx.compare_recovery_readiness_replay_to_projection(packet_id)
 
         return self.execute_command(command, handler)
 
@@ -1132,6 +1158,10 @@ class KernelStore:
                 packet["completed_at"] = payload["verified_at"]
         elif event_type == "recovery_replay_projection_compared":
             state.recovery_replay_projection_comparisons[entity_id] = dict(payload)
+        elif event_type == "recovery_readiness_packet_created":
+            state.recovery_readiness_packets[entity_id] = dict(payload)
+        elif event_type == "recovery_readiness_replay_projection_compared":
+            state.recovery_readiness_replay_projection_comparisons[entity_id] = dict(payload)
         elif event_type == "research_request_created":
             state.research_requests[entity_id] = dict(payload)
         elif event_type == "research_request_transitioned":
@@ -2758,6 +2788,229 @@ class KernelTransaction:
         )
         self.enqueue_projection(event_id, "recovery_replay_projection_comparison_projection")
         return comparison
+
+    def create_recovery_readiness_packet(self, *, scope: str, as_of: str) -> RecoveryReadinessPacket:
+        if self.command.requested_by in {"agent", "model", "tool"}:
+            raise PermissionError("recovery readiness packets are kernel-owned read-only state")
+        if not scope.strip() or not as_of.strip():
+            raise ValueError("recovery readiness packets require scope and as_of")
+        packet = self._build_recovery_readiness_packet(scope=scope, as_of=as_of)
+        if packet.live_controls_enabled:
+            raise PermissionError("recovery readiness packets cannot enable live controls")
+        payload = _recovery_readiness_packet_payload(packet)
+        event_id = self.append_event(
+            "recovery_readiness_packet_created",
+            "policy",
+            packet.packet_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO recovery_readiness_packets (
+              packet_id, scope, as_of, backup_cadence_summary_json,
+              restore_drill_summary_json, encrypted_payload_descriptor_summary_json,
+              payload_access_failure_summary_json, fail_closed_state_json,
+              next_operator_actions_json, readiness_status, evidence_refs_json,
+              live_controls_enabled, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                packet.packet_id,
+                packet.scope,
+                packet.as_of,
+                canonical_json(packet.backup_cadence_summary),
+                canonical_json(packet.restore_drill_summary),
+                canonical_json(packet.encrypted_payload_descriptor_summary),
+                canonical_json(packet.payload_access_failure_summary),
+                canonical_json(packet.fail_closed_state),
+                canonical_json(packet.next_operator_actions),
+                packet.readiness_status,
+                canonical_json(packet.evidence_refs),
+                0,
+                packet.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "recovery_readiness_packet_projection")
+        return packet
+
+    def compare_recovery_readiness_replay_to_projection(
+        self,
+        packet_id: str,
+    ) -> RecoveryReadinessReplayProjectionComparison:
+        projection_row = self.conn.execute(
+            "SELECT * FROM recovery_readiness_packets WHERE packet_id=?",
+            (packet_id,),
+        ).fetchone()
+        if projection_row is None:
+            raise ValueError("recovery readiness packet not found")
+        replay = KernelStore._replay_from_connection(self.conn)
+        replay_packet = replay.recovery_readiness_packets.get(packet_id, {})
+        projection_packet = _recovery_readiness_packet_row_payload(projection_row)
+        mismatches: list[str] = []
+        if replay_packet != projection_packet:
+            mismatches.append("recovery_readiness_packets")
+        comparison = RecoveryReadinessReplayProjectionComparison(
+            packet_id=packet_id,
+            replay_packet=replay_packet,
+            projection_packet=projection_packet,
+            matches=not mismatches,
+            mismatches=mismatches,
+        )
+        payload = _recovery_readiness_replay_projection_comparison_payload(comparison)
+        event_id = self.append_event(
+            "recovery_readiness_replay_projection_compared",
+            "policy",
+            comparison.comparison_id,
+            payload,
+            "internal",
+        )
+        self.conn.execute(
+            """
+            INSERT INTO recovery_readiness_replay_projection_comparisons (
+              comparison_id, packet_id, replay_packet_json, projection_packet_json,
+              matches, mismatches_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison.comparison_id,
+                comparison.packet_id,
+                canonical_json(comparison.replay_packet),
+                canonical_json(comparison.projection_packet),
+                1 if comparison.matches else 0,
+                canonical_json(comparison.mismatches),
+                comparison.created_at,
+            ),
+        )
+        self.enqueue_projection(event_id, "recovery_readiness_replay_projection_comparison_projection")
+        return comparison
+
+    def _build_recovery_readiness_packet(self, *, scope: str, as_of: str) -> RecoveryReadinessPacket:
+        cadence_rows = self.conn.execute(
+            "SELECT * FROM backup_cadence_records WHERE scope=? ORDER BY cadence_id",
+            (scope,),
+        ).fetchall()
+        cadence_ids = {row["cadence_id"] for row in cadence_rows}
+        all_drill_rows = self.conn.execute(
+            "SELECT * FROM restore_drill_packets ORDER BY scheduled_for, drill_id"
+        ).fetchall()
+        drill_rows = [row for row in all_drill_rows if row["cadence_id"] in cadence_ids]
+        descriptor_rows = self.conn.execute("SELECT * FROM encrypted_storage_descriptors ORDER BY descriptor_id").fetchall()
+        receipt_rows = self.conn.execute("SELECT * FROM payload_access_receipts ORDER BY created_at, receipt_id").fetchall()
+        recovery_verification_rows = self.conn.execute(
+            "SELECT * FROM recovery_verification_states ORDER BY verified_at, verification_id"
+        ).fetchall()
+        storage_verification_rows = self.conn.execute(
+            "SELECT * FROM encrypted_storage_access_verification_states ORDER BY verified_at, verification_id"
+        ).fetchall()
+
+        active_cadences = [row for row in cadence_rows if row["status"] == "active"]
+        overdue_cadence_ids = sorted(row["cadence_id"] for row in active_cadences if row["next_due_at"] <= as_of)
+        cadence_summary = {
+            "total": len(cadence_rows),
+            "active": len(active_cadences),
+            "paused": sum(1 for row in cadence_rows if row["status"] == "paused"),
+            "retired": sum(1 for row in cadence_rows if row["status"] == "retired"),
+            "overdue_active_cadence_ids": overdue_cadence_ids,
+            "next_due_at": min((row["next_due_at"] for row in active_cadences), default=None),
+            "encryption_required_for_active": all(bool(row["encryption_required"]) for row in active_cadences),
+        }
+
+        latest_drill = drill_rows[-1] if drill_rows else None
+        queued_overdue_drill_ids = sorted(
+            row["drill_id"] for row in drill_rows if row["status"] == "queued" and row["scheduled_for"] <= as_of
+        )
+        failed_or_blocked_drill_ids = sorted(
+            row["drill_id"] for row in drill_rows if row["status"] in {"failed", "blocked"}
+        )
+        drill_summary = {
+            "total": len(drill_rows),
+            "verified": sum(1 for row in drill_rows if row["status"] == "verified"),
+            "queued": sum(1 for row in drill_rows if row["status"] == "queued"),
+            "failed_or_blocked_drill_ids": failed_or_blocked_drill_ids,
+            "queued_overdue_drill_ids": queued_overdue_drill_ids,
+            "latest_drill_id": None if latest_drill is None else latest_drill["drill_id"],
+            "latest_drill_status": None if latest_drill is None else latest_drill["status"],
+        }
+
+        descriptor_status_counts: dict[str, int] = {}
+        for row in descriptor_rows:
+            descriptor_status_counts[row["status"]] = descriptor_status_counts.get(row["status"], 0) + 1
+        backup_payload_descriptor_ids = sorted(
+            row["descriptor_id"] for row in descriptor_rows if row["storage_scope"] == "backup_payload"
+        )
+        inaccessible_descriptor_ids = sorted(
+            row["descriptor_id"] for row in descriptor_rows if row["status"] == "inaccessible"
+        )
+        descriptor_summary = {
+            "total": len(descriptor_rows),
+            "backup_payload_descriptor_count": len(backup_payload_descriptor_ids),
+            "artifact_payload_descriptor_count": sum(
+                1 for row in descriptor_rows if row["storage_scope"] == "artifact_payload"
+            ),
+            "status_counts": descriptor_status_counts,
+            "inaccessible_descriptor_ids": inaccessible_descriptor_ids,
+            "backup_payload_descriptor_ids": backup_payload_descriptor_ids,
+        }
+
+        failed_receipts = [
+            row for row in receipt_rows if row["access_result"] != "allowed" or row["verification_status"] in {"failed", "blocked"}
+        ]
+        access_failure_summary = {
+            "failure_count": len(failed_receipts),
+            "failed_receipt_ids": [row["receipt_id"] for row in failed_receipts],
+            "latest_failure_at": max((row["created_at"] for row in failed_receipts), default=None),
+        }
+
+        recovery_fail_closed_ids = sorted(row["verification_id"] for row in recovery_verification_rows if row["fail_closed"])
+        storage_fail_closed_ids = sorted(row["verification_id"] for row in storage_verification_rows if row["fail_closed"])
+        fail_closed_state = {
+            "fail_closed": bool(
+                recovery_fail_closed_ids
+                or storage_fail_closed_ids
+                or inaccessible_descriptor_ids
+                or failed_or_blocked_drill_ids
+            ),
+            "recovery_verification_ids": recovery_fail_closed_ids,
+            "encrypted_storage_verification_ids": storage_fail_closed_ids,
+            "inaccessible_descriptor_ids": inaccessible_descriptor_ids,
+            "failed_or_blocked_drill_ids": failed_or_blocked_drill_ids,
+        }
+
+        actions = _recovery_readiness_actions(
+            active_cadence_ids=sorted(row["cadence_id"] for row in active_cadences),
+            drill_count=len(drill_rows),
+            overdue_cadence_ids=overdue_cadence_ids,
+            queued_overdue_drill_ids=queued_overdue_drill_ids,
+            failed_or_blocked_drill_ids=failed_or_blocked_drill_ids,
+            backup_payload_descriptor_ids=backup_payload_descriptor_ids,
+            inaccessible_descriptor_ids=inaccessible_descriptor_ids,
+            failed_receipt_ids=[row["receipt_id"] for row in failed_receipts],
+            recovery_fail_closed_ids=recovery_fail_closed_ids,
+            storage_fail_closed_ids=storage_fail_closed_ids,
+        )
+        readiness_status = "fail_closed" if fail_closed_state["fail_closed"] else ("action_required" if actions else "ready")
+        evidence_refs = _recovery_readiness_evidence_refs(
+            cadence_rows,
+            drill_rows,
+            descriptor_rows,
+            failed_receipts,
+            recovery_verification_rows,
+            storage_verification_rows,
+        )
+        return RecoveryReadinessPacket(
+            scope=scope,
+            as_of=as_of,
+            backup_cadence_summary=cadence_summary,
+            restore_drill_summary=drill_summary,
+            encrypted_payload_descriptor_summary=descriptor_summary,
+            payload_access_failure_summary=access_failure_summary,
+            fail_closed_state=fail_closed_state,
+            next_operator_actions=actions,
+            readiness_status=readiness_status,  # type: ignore[arg-type]
+            evidence_refs=evidence_refs,
+            live_controls_enabled=False,
+        )
 
     def create_research_request(self, request: ResearchRequest) -> str:
         if not request.question.strip():
@@ -8456,6 +8709,174 @@ def _recovery_replay_projection_comparison_payload(
         "mismatches": comparison.mismatches,
         "created_at": comparison.created_at,
     }
+
+
+def _recovery_readiness_packet_payload(packet: RecoveryReadinessPacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "scope": packet.scope,
+        "as_of": packet.as_of,
+        "backup_cadence_summary": packet.backup_cadence_summary,
+        "restore_drill_summary": packet.restore_drill_summary,
+        "encrypted_payload_descriptor_summary": packet.encrypted_payload_descriptor_summary,
+        "payload_access_failure_summary": packet.payload_access_failure_summary,
+        "fail_closed_state": packet.fail_closed_state,
+        "next_operator_actions": packet.next_operator_actions,
+        "readiness_status": packet.readiness_status,
+        "evidence_refs": packet.evidence_refs,
+        "live_controls_enabled": packet.live_controls_enabled,
+        "created_at": packet.created_at,
+    }
+
+
+def _recovery_readiness_packet_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "packet_id": row["packet_id"],
+        "scope": row["scope"],
+        "as_of": row["as_of"],
+        "backup_cadence_summary": _loads(row["backup_cadence_summary_json"]),
+        "restore_drill_summary": _loads(row["restore_drill_summary_json"]),
+        "encrypted_payload_descriptor_summary": _loads(row["encrypted_payload_descriptor_summary_json"]),
+        "payload_access_failure_summary": _loads(row["payload_access_failure_summary_json"]),
+        "fail_closed_state": _loads(row["fail_closed_state_json"]),
+        "next_operator_actions": _loads(row["next_operator_actions_json"]),
+        "readiness_status": row["readiness_status"],
+        "evidence_refs": _loads(row["evidence_refs_json"]),
+        "live_controls_enabled": bool(row["live_controls_enabled"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _recovery_readiness_replay_projection_comparison_payload(
+    comparison: RecoveryReadinessReplayProjectionComparison,
+) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "packet_id": comparison.packet_id,
+        "replay_packet": comparison.replay_packet,
+        "projection_packet": comparison.projection_packet,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
+    }
+
+
+def _recovery_readiness_actions(
+    *,
+    active_cadence_ids: list[str],
+    drill_count: int,
+    overdue_cadence_ids: list[str],
+    queued_overdue_drill_ids: list[str],
+    failed_or_blocked_drill_ids: list[str],
+    backup_payload_descriptor_ids: list[str],
+    inaccessible_descriptor_ids: list[str],
+    failed_receipt_ids: list[str],
+    recovery_fail_closed_ids: list[str],
+    storage_fail_closed_ids: list[str],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    if not active_cadence_ids:
+        actions.append(
+            {
+                "action": "record_active_backup_cadence",
+                "required_authority": "operator_gate",
+                "reason": "No active encrypted backup cadence exists for the readiness scope.",
+                "refs": [],
+            }
+        )
+    if overdue_cadence_ids:
+        actions.append(
+            {
+                "action": "run_due_backup",
+                "required_authority": "operator_gate",
+                "reason": "One or more active backup cadences are due or overdue.",
+                "refs": [f"kernel:backup_cadence_records/{cadence_id}" for cadence_id in overdue_cadence_ids],
+            }
+        )
+    if drill_count == 0 and active_cadence_ids:
+        actions.append(
+            {
+                "action": "schedule_restore_drill_if_none_current",
+                "required_authority": "operator_gate",
+                "reason": "Operator should keep a current restore drill attached to the active cadence.",
+                "refs": [f"kernel:backup_cadence_records/{cadence_id}" for cadence_id in active_cadence_ids],
+            }
+        )
+    if queued_overdue_drill_ids:
+        actions.append(
+            {
+                "action": "complete_restore_drill_checklist",
+                "required_authority": "operator_gate",
+                "reason": "Queued restore drill packets are scheduled at or before the readiness timestamp.",
+                "refs": [f"kernel:restore_drill_packets/{drill_id}" for drill_id in queued_overdue_drill_ids],
+            }
+        )
+    if failed_or_blocked_drill_ids or recovery_fail_closed_ids:
+        actions.append(
+            {
+                "action": "investigate_recovery_verification",
+                "required_authority": "operator_gate",
+                "reason": "Recovery verification is failed, blocked, or fail-closed.",
+                "refs": [
+                    *[f"kernel:restore_drill_packets/{drill_id}" for drill_id in failed_or_blocked_drill_ids],
+                    *[
+                        f"kernel:recovery_verification_states/{verification_id}"
+                        for verification_id in recovery_fail_closed_ids
+                    ],
+                ],
+            }
+        )
+    if not backup_payload_descriptor_ids:
+        actions.append(
+            {
+                "action": "register_backup_payload_descriptor",
+                "required_authority": "operator_gate",
+                "reason": "No encrypted storage descriptor is registered for backup payloads.",
+                "refs": [],
+            }
+        )
+    if inaccessible_descriptor_ids or failed_receipt_ids or storage_fail_closed_ids:
+        actions.append(
+            {
+                "action": "investigate_encrypted_payload_access",
+                "required_authority": "operator_gate",
+                "reason": "Encrypted payload descriptors or access receipts indicate inaccessible or failed state.",
+                "refs": [
+                    *[
+                        f"kernel:encrypted_storage_descriptors/{descriptor_id}"
+                        for descriptor_id in inaccessible_descriptor_ids
+                    ],
+                    *[f"kernel:payload_access_receipts/{receipt_id}" for receipt_id in failed_receipt_ids],
+                    *[
+                        f"kernel:encrypted_storage_access_verification_states/{verification_id}"
+                        for verification_id in storage_fail_closed_ids
+                    ],
+                ],
+            }
+        )
+    return actions
+
+
+def _recovery_readiness_evidence_refs(
+    cadence_rows: list[sqlite3.Row],
+    drill_rows: list[sqlite3.Row],
+    descriptor_rows: list[sqlite3.Row],
+    failed_receipts: list[sqlite3.Row],
+    recovery_verification_rows: list[sqlite3.Row],
+    storage_verification_rows: list[sqlite3.Row],
+) -> list[str]:
+    refs = [
+        *[f"kernel:backup_cadence_records/{row['cadence_id']}" for row in cadence_rows],
+        *[f"kernel:restore_drill_packets/{row['drill_id']}" for row in drill_rows],
+        *[f"kernel:encrypted_storage_descriptors/{row['descriptor_id']}" for row in descriptor_rows],
+        *[f"kernel:payload_access_receipts/{row['receipt_id']}" for row in failed_receipts],
+        *[f"kernel:recovery_verification_states/{row['verification_id']}" for row in recovery_verification_rows],
+        *[
+            f"kernel:encrypted_storage_access_verification_states/{row['verification_id']}"
+            for row in storage_verification_rows
+        ],
+    ]
+    return sorted(set(refs))
 
 
 def _source_plan_payload(plan: Any) -> dict[str, Any]:
