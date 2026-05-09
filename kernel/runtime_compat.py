@@ -18,7 +18,6 @@ import time
 import threading
 import types
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -53,7 +52,6 @@ from kernel.runtime import (
     normalize_runtime_layout as _kernel_normalize_runtime_layout,
     prepare_runtime_directories as _kernel_prepare_runtime_directories,
     require_runtime_databases as _kernel_require_runtime_databases,
-    runtime_logs_dir as _kernel_runtime_logs_dir,
     verify_runtime_databases as _kernel_verify_runtime_databases,
 )
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
@@ -125,281 +123,25 @@ DEFAULT_EVIDENCE_CYCLES = 5
 DEFAULT_REPLAY_REPORT_LIMIT = 10
 
 
-@dataclass(frozen=True)
-class RuntimeBootstrapResult:
-    """Structured result for a Hermes integration bootstrap attempt."""
-
-    ok: bool
-    config: IntegrationConfig
-    session_context: HermesSessionContext
-    database_status: dict[str, bool]
-    registered_tools: list[str]
-
-
-@dataclass(frozen=True)
-class RuntimeProfileInstallResult:
-    """Filesystem bundle describing how Hermes should bootstrap this runtime."""
-
-    config: IntegrationConfig
-    repo_root: str
-    profile_dir: str
-    profile_config_path: str
-    spec_profile_path: str
-    profile_manifest_path: str
-    launcher_paths: dict[str, str]
-    linked_skill_paths: list[str]
-
-
-@dataclass(frozen=True)
-class HermesProfileValidationResult:
-    """Structured validation result for the repo-owned Hermes profile artifacts."""
-
-    ok: bool
-    profile_dir: str
-    profile_config_path: str
-    spec_profile_path: str
-    checks: dict[str, bool]
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class RuntimeDoctorResult:
-    """Health report for the prepared Hermes runtime layout."""
-
-    ok: bool
-    config: IntegrationConfig
-    path_status: dict[str, bool]
-    database_status: dict[str, bool]
-    database_errors: dict[str, list[str]]
-    registered_tools: list[str]
-    missing_items: list[str]
-    profile_manifest_path: str
-    profile_validation: HermesProfileValidationResult
-
-
-@dataclass(frozen=True)
-class ExternalCommandResult:
-    """Captured result from a Hermes CLI probe."""
-
-    ok: bool
-    command: tuple[str, ...]
-    returncode: int
-    stdout: str
-    stderr: str
-    error: str | None = None
-
-
-@dataclass(frozen=True)
-class HermesReadinessResult:
-    """Readiness report for attaching the repo runtime to a real Hermes install."""
-
-    ok: bool
-    config: IntegrationConfig
-    hermes_installed: bool
-    hermes_version: str | None
-    hermes_version_ok: bool
-    profile_listed: bool
-    live_tools: list[str]
-    seed_tool_status: dict[str, bool]
-    config_status: dict[str, bool]
-    profile_validation: HermesProfileValidationResult
-    path_status: dict[str, bool]
-    database_status: dict[str, bool]
-    legacy_database_files: list[str]
-    cli_smoke_attempted: bool
-    cli_smoke_ok: bool
-    cli_smoke_marker: str | None
-    cli_smoke_step_outcomes_delta: int
-    cli_smoke_log_trace: bool
-    cli_smoke_output: str | None
-    one_shot_smoke_attempted: bool
-    one_shot_smoke_ok: bool
-    one_shot_smoke_output: str | None
-    deferred_items: list[str]
-    checkpoint_backup_path: str | None
-    blocking_items: list[str]
-    drift_items: list[str]
-    install: RuntimeProfileInstallResult
-    doctor: RuntimeDoctorResult
-    contract_harness: HermesContractHarnessResult
-    replay_report: dict[str, Any]
-    council_isolation_canary: dict[str, Any]
-    recommended_actions: list[str]
-
-
-@dataclass(frozen=True)
-class WorkflowObservabilitySnapshot:
-    """Queryable runtime evidence produced by the operator workflow proof."""
-
-    alert_history: list[dict[str, Any]]
-    council_verdicts: list[dict[str, Any]]
-    digest_history: list[dict[str, Any]]
-    immune_verdicts: list[dict[str, Any]]
-    telemetry_events: list[dict[str, Any]]
-    reliability_dashboard: dict[str, Any]
-    system_health: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class OperatorWorkflowResult:
-    """End-to-end operator workflow and council-backed project proof result."""
-
-    ok: bool
-    bootstrap: RuntimeBootstrapResult
-    sheriff_outcome: str
-    routing_tier: str | None
-    brief_id: str | None
-    readback: dict[str, Any] | None
-    opportunity_id: str | None
-    harvest_id: str | None
-    project_id: str | None
-    phase_gate_id: str | None
-    phase_gate_verdict: str | None
-    council_verdict_ids: list[str]
-    alert_id: str | None
-    digest_id: str | None
-    digest: dict[str, Any] | None
-    observability: WorkflowObservabilitySnapshot | None
-    doctor: RuntimeDoctorResult
-    trace_id: str | None = None
-    error: str | None = None
-
-
-@dataclass(frozen=True)
-class HermesContractHarnessResult:
-    """Repo-local Hermes-parity lifecycle proof without requiring a live Hermes install."""
-
-    ok: bool
-    config: IntegrationConfig
-    bootstrap: RuntimeBootstrapResult
-    doctor: RuntimeDoctorResult
-    contract_checks: dict[str, bool]
-    route_decision: dict[str, Any] | None
-    approval_request: dict[str, Any] | None
-    approval_review: dict[str, Any] | None
-    dispatch_result: dict[str, Any] | None
-    judge_deadlock_event: dict[str, Any] | None
-    runtime_halt: dict[str, Any] | None
-    blocked_dispatch_pre_side_effect: bool
-    blocked_dispatch_reason: str | None
-    restart_result: dict[str, Any] | None
-    final_runtime_status: dict[str, Any] | None
-    v012_contract_checks: dict[str, bool]
-    trace_id: str | None
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class TaskLoopProofResult:
-    ok: bool
-    config: IntegrationConfig
-    bootstrap: RuntimeBootstrapResult
-    doctor: RuntimeDoctorResult
-    task_id: str | None
-    brief_id: str | None
-    route_summary: dict[str, Any] | None
-    trace_id: str | None
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class ResearchCronProofResult:
-    ok: bool
-    config: IntegrationConfig
-    bootstrap: RuntimeBootstrapResult
-    doctor: RuntimeDoctorResult
-    standing_brief_id: str | None
-    scheduled_job_id: str | None
-    queued_task_id: str | None
-    trace_id: str | None
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class ProxySelfTestResult:
-    ok: bool
-    config: IntegrationConfig
-    proxy_url: str | None
-    allowed_request_count: int
-    blocked_request_count: int
-    audit_log_path: str
-    trace_id: str | None
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class BootstrapStackResult:
-    ok: bool
-    install: RuntimeProfileInstallResult
-    doctor: RuntimeDoctorResult
-    operator_workflow: OperatorWorkflowResult
-    contract_harness: HermesContractHarnessResult
-    task_loop_proof: TaskLoopProofResult
-    research_cron_proof: ResearchCronProofResult
-    proxy_self_test: ProxySelfTestResult
-    milestone_status: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class EvidenceScenarioResult:
-    scenario_id: str
-    cycle_index: int
-    classification: str
-    ok: bool
-    trace_id: str | None
-    produced_skill_families: list[str]
-    issues: list[str]
-    details: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class EvidenceBatchResult:
-    ok: bool
-    config: IntegrationConfig
-    bootstrap: RuntimeBootstrapResult
-    doctor: RuntimeDoctorResult
-    requested_cycles: int
-    cycles: int
-    until_replay_ready: bool
-    stopped_reason: str
-    scenario_results: list[EvidenceScenarioResult]
-    generated_trace_count: int
-    generated_source_trace_count: int
-    generated_activation_trace_count: int
-    generated_known_bad_trace_count: int
-    before_replay_report: dict[str, Any]
-    replay_report: dict[str, Any]
-    progress_projection: dict[str, Any]
-    report_path: str
-
-
-@dataclass(frozen=True)
-class FlywheelDrillResult:
-    ok: bool
-    config: IntegrationConfig
-    bootstrap: RuntimeBootstrapResult
-    doctor: RuntimeDoctorResult
-    workflow: OperatorWorkflowResult
-    before_replay_report: dict[str, Any]
-    replay_report: dict[str, Any]
-    generated_trace_count: int
-    generated_activation_trace_count: int
-    generated_known_bad_trace_count: int
-    trace_id: str | None
-    artifact_path: str
-    issues: list[str]
-
-
-@dataclass(frozen=True)
-class MacStudioDayOneResult:
-    ok: bool
-    install: RuntimeProfileInstallResult
-    doctor: RuntimeDoctorResult
-    bootstrap_stack: BootstrapStackResult
-    evidence_batch: EvidenceBatchResult
-    replay_report: dict[str, Any]
-    handoff_path: str
-    issues: list[str]
+from kernel.runtime_results import (
+    BootstrapStackResult,
+    EvidenceBatchResult,
+    EvidenceScenarioResult,
+    ExternalCommandResult,
+    FlywheelDrillResult,
+    HermesContractHarnessResult,
+    HermesProfileValidationResult,
+    HermesReadinessResult,
+    MacStudioDayOneResult,
+    OperatorWorkflowResult,
+    ProxySelfTestResult,
+    ResearchCronProofResult,
+    RuntimeBootstrapResult,
+    RuntimeDoctorResult,
+    RuntimeProfileInstallResult,
+    TaskLoopProofResult,
+    WorkflowObservabilitySnapshot,
+)
 
 
 def _utc_now() -> str:
@@ -716,165 +458,38 @@ def _normalize_runtime_layout(config: IntegrationConfig) -> IntegrationConfig:
     return _kernel_normalize_runtime_layout(config)
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _runtime_bundle_dir(config: IntegrationConfig) -> Path:
-    return Path(config.skills_dir) / "runtime"
-
-
-def _runtime_profile_manifest_path(config: IntegrationConfig) -> Path:
-    return _runtime_bundle_dir(config) / "profile_manifest.json"
-
-
-def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
-    bin_dir = _runtime_bundle_dir(config) / "bin"
-    return {
-        "bootstrap": bin_dir / "bootstrap_runtime.sh",
-        "bootstrap_stack": bin_dir / "bootstrap_stack.sh",
-        "doctor": bin_dir / "doctor_runtime.sh",
-        "readiness": bin_dir / "readiness_runtime.sh",
-        "start_proxy": bin_dir / "start_local_forward_proxy.sh",
-        "proxy_self_test": bin_dir / "proxy_self_test.sh",
-        "operator_workflow": bin_dir / "run_operator_workflow.sh",
-        "contract_harness": bin_dir / "contract_harness_runtime.sh",
-        "task_loop_proof": bin_dir / "task_loop_proof.sh",
-        "research_cron_proof": bin_dir / "research_cron_proof.sh",
-        "flywheel_drill": bin_dir / "flywheel_drill.sh",
-        "evidence_factory": bin_dir / "evidence_factory.sh",
-        "replay_readiness_report": bin_dir / "replay_readiness_report.sh",
-        "export_replay_corpus": bin_dir / "export_replay_corpus.sh",
-        "optimizer_snapshot": bin_dir / "optimizer_snapshot.sh",
-        "analyze_harness_candidates": bin_dir / "analyze_harness_candidates.sh",
-        "propose_best_harness_candidate": bin_dir / "propose_best_harness_candidate.sh",
-        "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
-        "gateway": bin_dir / "start_gateway.sh",
-        "workspace": bin_dir / "start_workspace.sh",
-        "operator_checklist": bin_dir / "operator_validation_checklist.sh",
-        "milestone_status": bin_dir / "milestone_status.sh",
-        "workspace_overview": bin_dir / "workspace_overview.sh",
-    }
-
-
-def _linked_skills_dir(config: IntegrationConfig) -> Path:
-    return _runtime_bundle_dir(config) / "linked_skills"
-
-
-def _runtime_root(config: IntegrationConfig) -> Path:
-    return Path(config.data_dir).expanduser().resolve().parent
-
-
-def _runtime_profile_dir(config: IntegrationConfig) -> Path:
-    return _runtime_root(config) / "profiles" / config.profile_name
-
-
-def _runtime_logs_dir(config: IntegrationConfig) -> Path:
-    return _kernel_runtime_logs_dir(config)
-
-
-def _runtime_profile_config_path(config: IntegrationConfig) -> Path:
-    return _runtime_profile_dir(config) / "config.yaml"
-
-
-def _runtime_spec_profile_path(config: IntegrationConfig) -> Path:
-    return _runtime_profile_dir(config) / "profile.yaml"
-
-
-def _runtime_profile_validation_repo_root(config: IntegrationConfig) -> Path:
-    manifest = _read_json_yaml(_runtime_profile_manifest_path(config))
-    if manifest is not None:
-        repo_root = manifest.get("repo_root")
-        if isinstance(repo_root, str) and repo_root.strip():
-            return Path(repo_root).expanduser().resolve()
-    return _repo_root()
-
-
-def _runtime_operator_validation_checklist_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["operator_validation_checklist"]
-
-
-def _runtime_network_controls_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["network_controls"]
-
-
-def _runtime_proxy_allowlist_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["proxy_allowlist"]
-
-
-def _runtime_gateway_manifest_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["gateway_manifest"]
-
-
-def _runtime_workspace_manifest_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["workspace_manifest"]
-
-
-def _runtime_local_provider_doctor_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["local_provider_doctor"]
-
-
-def _runtime_curator_readiness_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["curator_readiness"]
-
-
-def _runtime_evidence_factory_manifest_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["evidence_factory_manifest"]
-
-
-def _runtime_flywheel_drill_report_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["flywheel_drill_report"]
-
-
-def _runtime_replay_readiness_report_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["replay_readiness_report"]
-
-
-def _runtime_replay_corpus_export_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["replay_corpus_export"]
-
-
-def _runtime_optimizer_snapshot_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["optimizer_snapshot"]
-
-
-def _runtime_harness_candidate_report_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["harness_candidate_report"]
-
-
-def _runtime_mac_studio_day_one_handoff_path(config: IntegrationConfig) -> Path:
-    return runtime_support_artifact_paths(config)["mac_studio_day_one_handoff"]
-
-
-def _runtime_proxy_audit_log_path(config: IntegrationConfig) -> Path:
-    return _runtime_logs_dir(config) / "local_forward_proxy_audit.jsonl"
-
-
-def _proxy_bind_host_port(config: IntegrationConfig) -> tuple[str, int]:
-    split = urlsplit(config.proxy_bind_url)
-    return split.hostname or "127.0.0.1", split.port or 18080
-
-
-def _proxy_config_payload(
-    config: IntegrationConfig,
-    *,
-    bind_host: str | None = None,
-    bind_port: int | None = None,
-    audit_log_path: str | None = None,
-    allowed_domains: Sequence[str] | None = None,
-    allowed_ports: Sequence[int] | None = None,
-) -> dict[str, Any]:
-    default_host, default_port = _proxy_bind_host_port(config)
-    return {
-        "bind_host": bind_host or default_host,
-        "bind_port": bind_port if bind_port is not None else default_port,
-        "audit_log_path": audit_log_path or str(_runtime_proxy_audit_log_path(config)),
-        "outbound_allowlist": {
-            "domains": list(allowed_domains or config.outbound_allowlist_domains),
-            "ports": [int(port) for port in (allowed_ports or config.outbound_allowlist_ports)],
-            "schemes": ["http", "https"],
-        },
-    }
+from kernel.runtime_paths import (
+    _linked_skills_dir,
+    _proxy_bind_host_port,
+    _proxy_config_payload,
+    _read_json_yaml,
+    _repo_root,
+    _runtime_bundle_dir,
+    _runtime_curator_readiness_path,
+    _runtime_evidence_factory_manifest_path,
+    _runtime_flywheel_drill_report_path,
+    _runtime_gateway_manifest_path,
+    _runtime_harness_candidate_report_path,
+    _runtime_launcher_paths,
+    _runtime_local_provider_doctor_path,
+    _runtime_logs_dir,
+    _runtime_mac_studio_day_one_handoff_path,
+    _runtime_network_controls_path,
+    _runtime_operator_validation_checklist_path,
+    _runtime_optimizer_snapshot_path,
+    _runtime_profile_config_path,
+    _runtime_profile_dir,
+    _runtime_profile_manifest_path,
+    _runtime_profile_validation_repo_root,
+    _runtime_proxy_allowlist_path,
+    _runtime_proxy_audit_log_path,
+    _runtime_replay_corpus_export_path,
+    _runtime_replay_readiness_report_path,
+    _runtime_root,
+    _runtime_spec_profile_path,
+    _runtime_workspace_manifest_path,
+    _write_json_yaml,
+)
 
 
 def _evidence_factory_scenario_catalog() -> list[dict[str, Any]]:
@@ -1193,20 +808,6 @@ def _run_command_candidates(
     return last_result
 
 
-def _write_json_yaml(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(f"{json.dumps(payload, indent=2, sort_keys=True)}\n", encoding="utf-8")
-
-
-def _read_json_yaml(path: Path) -> dict[str, Any] | None:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) -> dict[str, bool]:
