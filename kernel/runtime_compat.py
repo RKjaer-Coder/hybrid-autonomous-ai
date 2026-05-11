@@ -485,6 +485,7 @@ from kernel.runtime_paths import (
     _runtime_network_controls_path,
     _runtime_operator_validation_checklist_path,
     _runtime_optimizer_snapshot_path,
+    _runtime_pre_hermes_readiness_path,
     _runtime_profile_config_path,
     _runtime_profile_dir,
     _runtime_profile_manifest_path,
@@ -1200,6 +1201,13 @@ def _write_migration_readiness_artifact(config: IntegrationConfig, payload: dict
     _write_json_yaml(_runtime_migration_readiness_path(config), artifact)
 
 
+def _write_pre_hermes_readiness_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_pre_hermes_readiness_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_pre_hermes_readiness_path(config), artifact)
+
+
 def _migration_record_payloads(config: IntegrationConfig, repo_root: Path, as_of: str) -> list[dict[str, Any]]:
     data_dir = Path(config.data_dir)
     spec_migration_ref = "spec:s09_decisions_risks#ADR-009 Migration Map Before Rewrite"
@@ -1569,6 +1577,170 @@ def latest_migration_readiness(config: IntegrationConfig | None = None) -> dict[
         "available": False,
         "status": "NOT_RUN",
         "artifact_path": str(_runtime_migration_readiness_path(resolved)),
+        "live_controls_enabled": False,
+    }
+
+
+def _pre_hermes_component_status(component: str, payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    if not payload.get("available", False):
+        return "action_required", [
+            {
+                "action": f"create_{component}",
+                "required_authority": "operator_gate",
+                "reason": f"{component.replace('_', ' ')} has not been generated for this runtime.",
+                "refs": [payload.get("artifact_path") or payload.get("kernel_db_path") or "runtime"],
+            }
+        ]
+    if component == "replay_readiness":
+        if payload.get("status") == "READY_FOR_BROADER_REPLAY":
+            return "ready", []
+        blockers = payload.get("blockers", [])
+        return "action_required", [
+            {
+                "action": "grow_replay_corpus",
+                "required_authority": "operator_gate",
+                "reason": "Replay evidence remains below the broader autonomous activation threshold.",
+                "refs": [payload.get("artifact_path", "replay_readiness_report")],
+                "blockers": list(blockers) if isinstance(blockers, list) else [],
+            }
+        ]
+    if component == "migration_readiness":
+        summary = payload.get("summary", {})
+        status_counts = summary.get("status_counts", {}) if isinstance(summary, dict) else {}
+        if status_counts.get("blocked", 0) > 0:
+            return "blocked", []
+        if status_counts.get("action_required", 0) > 0:
+            return "action_required", []
+        return "ready", []
+    packet = payload.get("packet", {})
+    readiness_status = packet.get("readiness_status") if isinstance(packet, dict) else payload.get("readiness_status")
+    if readiness_status == "ready":
+        return "ready", []
+    if readiness_status == "fail_closed":
+        return "blocked", list(packet.get("next_operator_actions", [])) if isinstance(packet, dict) else []
+    return "action_required", list(packet.get("next_operator_actions", [])) if isinstance(packet, dict) else []
+
+
+def _pre_hermes_readiness_summary(components: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    component_status: dict[str, str] = {}
+    next_actions: list[dict[str, Any]] = []
+    for name, payload in components.items():
+        status, actions = _pre_hermes_component_status(name, payload)
+        component_status[name] = status
+        next_actions.extend(actions)
+    if any(status == "blocked" for status in component_status.values()):
+        status = "blocked"
+    elif all(status == "ready" for status in component_status.values()):
+        status = "ready_for_target_machine_validation"
+    else:
+        status = "action_required"
+    return {
+        "status": status,
+        "component_status": component_status,
+        "next_operator_action_count": len(next_actions),
+        "next_operator_actions": next_actions,
+    }
+
+
+def pre_hermes_readiness(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    install_runtime_profile(resolved, repo_root=str(root))
+    timestamp = as_of or _utc_now()
+    replay = replay_readiness_report(resolved, repo_root=str(root)) if refresh else _read_json_yaml(_runtime_replay_readiness_report_path(resolved))
+    if replay is None:
+        replay = {
+            "available": False,
+            "status": "NOT_RUN",
+            "artifact_path": str(_runtime_replay_readiness_report_path(resolved)),
+            "live_controls_enabled": False,
+        }
+    else:
+        replay = {"available": True, **replay, "live_controls_enabled": False}
+    hermes = (
+        hermes_adapter_readiness(resolved, repo_root=str(root))
+        if refresh
+        else latest_hermes_adapter_readiness(resolved)
+    )
+    migration = migration_readiness(resolved, repo_root=str(root), as_of=timestamp) if refresh else latest_migration_readiness(resolved)
+    recovery = latest_recovery_readiness(resolved)
+    components = {
+        "replay_readiness": replay,
+        "recovery_readiness": recovery,
+        "hermes_adapter_readiness": hermes,
+        "migration_readiness": migration,
+    }
+    payload = {
+        "available": True,
+        "as_of": timestamp,
+        "summary": _pre_hermes_readiness_summary(components),
+        "components": components,
+        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "artifact_path": str(_runtime_pre_hermes_readiness_path(resolved)),
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "live_hermes_attachment",
+            "dashboard_write_controls",
+            "customer_commitments",
+            "provider_calls",
+            "provider_plugin_mutation",
+            "autonomous_model_promotion",
+        ],
+    }
+    _write_pre_hermes_readiness_artifact(resolved, payload)
+    return payload
+
+
+def latest_pre_hermes_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    artifact = _read_json_yaml(_runtime_pre_hermes_readiness_path(resolved))
+    if artifact is not None and artifact.get("available") is True:
+        return artifact
+    replay = _read_json_yaml(_runtime_replay_readiness_report_path(resolved))
+    components = {
+        "replay_readiness": (
+            {"available": True, **replay, "live_controls_enabled": False}
+            if replay is not None
+            else {
+                "available": False,
+                "status": "NOT_RUN",
+                "artifact_path": str(_runtime_replay_readiness_report_path(resolved)),
+                "live_controls_enabled": False,
+            }
+        ),
+        "recovery_readiness": latest_recovery_readiness(resolved),
+        "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
+        "migration_readiness": latest_migration_readiness(resolved),
+    }
+    if any(component.get("available") is True for component in components.values()):
+        return {
+            "available": True,
+            "summary": _pre_hermes_readiness_summary(components),
+            "components": components,
+            "kernel_db_path": str(_kernel_db_path(resolved)),
+            "artifact_path": str(_runtime_pre_hermes_readiness_path(resolved)),
+            "live_controls_enabled": False,
+            "disabled_live_controls": [
+                "live_hermes_attachment",
+                "dashboard_write_controls",
+                "customer_commitments",
+                "provider_calls",
+                "provider_plugin_mutation",
+                "autonomous_model_promotion",
+            ],
+        }
+    return {
+        "available": False,
+        "status": "NOT_RUN",
+        "artifact_path": str(_runtime_pre_hermes_readiness_path(resolved)),
         "live_controls_enabled": False,
     }
 
@@ -2039,6 +2211,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "harness_candidate_command": _command_string(config, "--analyze-harness-candidates", repo_root),
         "hermes_adapter_readiness_command": _command_string(config, "--hermes-adapter-readiness", repo_root),
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
+        "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
         "custom_dashboard_plugin": False,
@@ -2049,6 +2222,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "recovery_readiness",
             "hermes_adapter_readiness",
             "migration_readiness",
+            "pre_hermes_readiness",
         ],
     }
     local_provider_doc = {
@@ -2194,6 +2368,15 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_pre_hermes_readiness_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--pre-hermes-readiness", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
     _runtime_operator_validation_checklist_path(config).write_text(
         "\n".join(checklist_lines) + "\n",
         encoding="utf-8",
@@ -2281,6 +2464,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "mac_studio_day_one_handoff_path": str(_runtime_mac_studio_day_one_handoff_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
+        "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
             "custom_plugin": False,
@@ -2314,6 +2498,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "mac_studio_day_one": _command_string(resolved, "--mac-studio-day-one", root),
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "migration_readiness": _command_string(resolved, "--migration-readiness", root),
+            "pre_hermes_readiness": _command_string(resolved, "--pre-hermes-readiness", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
@@ -2354,6 +2539,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["mac_studio_day_one"], resolved, root, "--mac-studio-day-one")
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
+    _write_launcher(launcher_paths["pre_hermes_readiness"], resolved, root, "--pre-hermes-readiness")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
@@ -2486,6 +2672,7 @@ def doctor_runtime(
         "mac_studio_day_one_handoff": _runtime_mac_studio_day_one_handoff_path(resolved).is_file(),
         "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
         "migration_readiness": _runtime_migration_readiness_path(resolved).is_file(),
+        "pre_hermes_readiness": _runtime_pre_hermes_readiness_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
@@ -2502,6 +2689,7 @@ def doctor_runtime(
         "mac_studio_day_one_launcher": launcher_paths["mac_studio_day_one"].is_file(),
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
+        "pre_hermes_readiness_launcher": launcher_paths["pre_hermes_readiness"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
         "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
@@ -3422,9 +3610,11 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "recovery_readiness": latest_recovery_readiness(resolved),
         "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
         "migration_readiness": latest_migration_readiness(resolved),
+        "pre_hermes_readiness": latest_pre_hermes_readiness(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
+        "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
         "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
@@ -5685,6 +5875,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
+    parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -5997,6 +6188,14 @@ def _main_impl(
 
     if args.migration_readiness:
         payload = migration_readiness(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.pre_hermes_readiness:
+        payload = pre_hermes_readiness(
             config=config,
             repo_root=args.repo_root,
         )

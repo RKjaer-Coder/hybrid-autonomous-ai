@@ -129,9 +129,10 @@ The commercial loop, artifact lifecycle, backup/restore path, recovery
 readiness packets, encrypted payload descriptors, and model-routing seed records
 are kernel-owned deterministic state. The legacy module/database migration map
 is also kernel-owned and replay-checked, with a deterministic outbox-fed
-operator digest projection for read-only inspection. Live workers, real
-customer integrations, revenue webhooks, and Hermes-native dashboard authority
-remain future-gated.
+operator digest projection for read-only inspection. The pre-Hermes readiness
+summary composes replay, recovery, adapter, and migration evidence into one
+read-only operator packet. Live workers, real customer integrations, revenue
+webhooks, and Hermes-native dashboard authority remain future-gated.
 
 Run the full test suite:
 
@@ -181,6 +182,12 @@ Create or surface the read-only legacy module/database migration-readiness map:
 
 ```bash
 python3 -m skills.runtime --migration-readiness
+```
+
+Create or surface the read-only pre-Hermes readiness summary:
+
+```bash
+python3 -m skills.runtime --pre-hermes-readiness
 ```
 
 Export activation-relevant replay traces for offline harness work:
@@ -250,6 +257,7 @@ python3 -m skills.runtime --evidence-factory --until-replay-ready --evidence-cyc
 python3 -m skills.runtime --export-replay-corpus
 python3 -m skills.runtime --optimizer-snapshot
 python3 -m skills.runtime --analyze-harness-candidates
+python3 -m skills.runtime --pre-hermes-readiness
 python3 -m skills.runtime --bootstrap-live
 python3 -m skills.runtime --mac-studio-day-one
 ```
