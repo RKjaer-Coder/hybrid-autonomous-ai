@@ -26,6 +26,7 @@ SUPPORT_ARTIFACT_FILENAMES = {
     "mac_studio_day_one_handoff": "mac_studio_day_one_handoff.md",
     "hermes_adapter_readiness": "hermes_adapter_readiness.json",
     "migration_readiness": "migration_readiness.json",
+    "pre_hermes_readiness": "pre_hermes_readiness.json",
 }
 
 
@@ -64,6 +65,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "mac_studio_day_one": bin_dir / "mac_studio_day_one.sh",
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "migration_readiness": bin_dir / "migration_readiness.sh",
+        "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",

@@ -29,6 +29,7 @@ from skills.runtime import (
     migration_readiness,
     migrate_runtime_databases,
     optimizer_snapshot,
+    pre_hermes_readiness,
     prepare_runtime_directories,
     replay_readiness_report,
     require_runtime_databases,
@@ -1026,6 +1027,39 @@ def test_migration_readiness_creates_kernel_map_and_workspace_surface(tmp_path):
     assert projected is not None
     assert projected["authoritative_source"] == "kernel.events"
     assert projected["live_controls_enabled"] == 0
+
+
+def test_pre_hermes_readiness_summarizes_blocked_substrate_without_live_controls(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = pre_hermes_readiness(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:02:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert "provider_calls" in payload["disabled_live_controls"]
+    assert payload["summary"]["status"] == "action_required"
+    assert payload["summary"]["component_status"]["migration_readiness"] == "action_required"
+    assert payload["summary"]["component_status"]["hermes_adapter_readiness"] == "action_required"
+    assert payload["summary"]["component_status"]["replay_readiness"] == "action_required"
+    assert payload["components"]["migration_readiness"]["operator_projection_comparison"]["matches"] is True
+    assert payload["components"]["hermes_adapter_readiness"]["packet"]["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+    overview = workspace_overview(cfg)
+    pre_hermes = overview["pre_hermes_readiness"]
+    assert pre_hermes["available"] is True
+    assert pre_hermes["summary"]["status"] == "action_required"
+    assert pre_hermes["live_controls_enabled"] is False
+    assert overview["pre_hermes_readiness_path"] == payload["artifact_path"]
 
 
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
