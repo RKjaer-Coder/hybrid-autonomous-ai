@@ -72,6 +72,11 @@ from .records import (
     SourcePlan,
     SideEffectIntent,
     SideEffectReceipt,
+    SelfImprovementEvalRecord,
+    SelfImprovementPromotionPacket,
+    SelfImprovementProposal,
+    SelfImprovementReplayProjectionComparison,
+    SelfImprovementRollbackRecord,
     canonical_json,
     new_id,
     now_iso,
@@ -92,6 +97,7 @@ from .store_commercial import CommercialKernelTransactionMixin
 from .store_model_intelligence import ModelIntelligenceKernelTransactionMixin
 from .store_recovery import RecoveryKernelTransactionMixin
 from .store_research import ResearchKernelTransactionMixin
+from .store_self_improvement import SelfImprovementKernelTransactionMixin
 from .store_common import (
     _loads,
 )
@@ -938,6 +944,44 @@ class KernelStore:
 
         return self.execute_command(command, handler)
 
+    def record_self_improvement_proposal(self, command: Command, proposal: SelfImprovementProposal) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_self_improvement_proposal(proposal)
+
+        return self.execute_command(command, handler)
+
+    def record_self_improvement_eval(self, command: Command, record: SelfImprovementEvalRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_self_improvement_eval(record)
+
+        return self.execute_command(command, handler)
+
+    def create_self_improvement_promotion_packet(
+        self,
+        command: Command,
+        packet: SelfImprovementPromotionPacket,
+    ) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.create_self_improvement_promotion_packet(packet)
+
+        return self.execute_command(command, handler)
+
+    def record_self_improvement_rollback(self, command: Command, record: SelfImprovementRollbackRecord) -> str:
+        def handler(tx: KernelTransaction) -> str:
+            return tx.record_self_improvement_rollback(record)
+
+        return self.execute_command(command, handler)
+
+    def compare_self_improvement_replay_to_projection(
+        self,
+        command: Command,
+        scope: str = "self_improvement",
+    ) -> SelfImprovementReplayProjectionComparison:
+        def handler(tx: KernelTransaction) -> SelfImprovementReplayProjectionComparison:
+            return tx.compare_self_improvement_replay_to_projection(scope)
+
+        return self.execute_command(command, handler)
+
     def replay_critical_state(self) -> ReplayState:
         with self.connect() as conn:
             return self._replay_from_connection(conn)
@@ -1053,6 +1097,7 @@ class KernelTransaction(
     ResearchKernelTransactionMixin,
     CommercialKernelTransactionMixin,
     ModelIntelligenceKernelTransactionMixin,
+    SelfImprovementKernelTransactionMixin,
 ):
     def __init__(self, conn: sqlite3.Connection, command: Command) -> None:
         self.conn = conn

@@ -100,6 +100,11 @@ class ReplayState:
     model_promotion_decision_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_demotion_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     model_routing_state: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_proposals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_eval_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_promotion_packets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_rollbacks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    self_improvement_replay_projection_comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     inspection_tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -355,6 +360,24 @@ def apply_replay_event(state: ReplayState, event_type: str, entity_id: str, payl
         state.model_candidates[payload["model_id"]]["last_verified_at"] = payload["created_at"]
         for routing_state in payload["routing_state_after"]:
             state.model_routing_state[routing_state["state_id"]] = dict(routing_state)
+    elif event_type == "self_improvement_proposal_recorded":
+        state.self_improvement_proposals[entity_id] = dict(payload)
+    elif event_type == "self_improvement_eval_recorded":
+        state.self_improvement_eval_records[entity_id] = dict(payload)
+        proposal = state.self_improvement_proposals.get(payload["proposal_id"])
+        if proposal is not None and proposal["status"] == "proposed":
+            proposal["status"] = "eval_running"
+            proposal["updated_at"] = payload["created_at"]
+    elif event_type == "self_improvement_promotion_packet_created":
+        state.self_improvement_promotion_packets[entity_id] = dict(payload)
+    elif event_type == "self_improvement_rollback_recorded":
+        state.self_improvement_rollbacks[entity_id] = dict(payload)
+        proposal = state.self_improvement_proposals.get(payload["proposal_id"])
+        if proposal is not None and payload["status"] == "applied":
+            proposal["status"] = "rolled_back"
+            proposal["updated_at"] = payload["created_at"]
+    elif event_type == "self_improvement_replay_projection_compared":
+        state.self_improvement_replay_projection_comparisons[entity_id] = dict(payload)
     elif event_type == "side_effect_intent_prepared":
         state.side_effects[entity_id] = {"intent": dict(payload), "receipt": None}
     elif event_type == "side_effect_receipt_recorded":

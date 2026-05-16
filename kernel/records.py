@@ -193,6 +193,11 @@ DemotionReason = Literal[
     "replacement_regression",
 ]
 RoutingStateStatus = Literal["active", "demoted", "blocked"]
+SelfImprovementTargetType = Literal["harness", "workflow", "tool", "model", "eval", "policy"]
+SelfImprovementStatus = Literal["proposed", "eval_running", "approved", "rejected", "promoted", "rolled_back"]
+SelfImprovementEvalStatus = Literal["recorded", "passed", "failed", "needs_more_data"]
+SelfImprovementPromotionRecommendation = Literal["approve", "reject", "needs_more_data", "rollback"]
+SelfImprovementRollbackStatus = Literal["prepared", "applied", "blocked"]
 
 
 def new_id() -> str:
@@ -1351,6 +1356,90 @@ class ModelDemotionRecord:
     decision_id: str | None = None
     authority_effect: Literal["immediate_routing_update"] = "immediate_routing_update"
     demotion_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementProposal:
+    target_type: SelfImprovementTargetType
+    target_id: str
+    problem_evidence: list[str]
+    proposed_change: str
+    expected_benefit: str
+    risk_assessment: str
+    eval_plan: str
+    rollback_plan: str
+    authority_required: Authority
+    proposer_type: ActorType
+    proposer_id: str
+    affected_policy_areas: list[str]
+    data_classes: list[DataClass]
+    status: SelfImprovementStatus = "proposed"
+    proposal_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementEvalRecord:
+    proposal_id: str
+    eval_type: Literal["replay", "shadow", "regression", "safety", "cost_latency"]
+    baseline_ref: str
+    candidate_ref: str
+    dataset_refs: list[str]
+    metrics: JsonObject
+    regression_thresholds: JsonObject
+    failure_examples: list[JsonObject]
+    side_effect_safety: JsonObject
+    status: SelfImprovementEvalStatus
+    authority_effect: Literal["evidence_only"] = "evidence_only"
+    eval_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementPromotionPacket:
+    proposal_id: str
+    decision_id: str
+    recommendation: SelfImprovementPromotionRecommendation
+    required_authority: Authority
+    eval_record_ids: list[str]
+    evidence_refs: list[str]
+    risk_flags: list[str]
+    gate_packet: JsonObject
+    default_on_timeout: str
+    status: Literal["proposed", "gated", "decided", "cancelled"] = "proposed"
+    packet_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementRollbackRecord:
+    proposal_id: str
+    packet_id: str
+    previous_ref: str
+    rollback_reason: str
+    receipt_ref: str | None
+    receipt_hash: str | None
+    status: SelfImprovementRollbackStatus
+    rollback_id: str = field(default_factory=new_id)
+    created_at: str = field(default_factory=now_iso)
+
+
+@dataclass(frozen=True)
+class SelfImprovementReplayProjectionComparison:
+    scope: str
+    replay_proposals: list[JsonObject]
+    projection_proposals: list[JsonObject]
+    replay_eval_records: list[JsonObject]
+    projection_eval_records: list[JsonObject]
+    replay_promotion_packets: list[JsonObject]
+    projection_promotion_packets: list[JsonObject]
+    replay_rollbacks: list[JsonObject]
+    projection_rollbacks: list[JsonObject]
+    matches: bool
+    mismatches: list[str]
+    comparison_id: str = field(default_factory=new_id)
     created_at: str = field(default_factory=now_iso)
 
 

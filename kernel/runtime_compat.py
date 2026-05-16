@@ -496,6 +496,7 @@ from kernel.runtime_paths import (
     _runtime_replay_corpus_export_path,
     _runtime_replay_readiness_report_path,
     _runtime_root,
+    _runtime_self_improvement_snapshot_path,
     _runtime_spec_profile_path,
     _runtime_workspace_manifest_path,
     _write_json_yaml,
@@ -1962,6 +1963,84 @@ def latest_pre_hermes_readiness(config: IntegrationConfig | None = None) -> dict
     }
 
 
+def _self_improvement_rows(db_path: Path, table: str, order_by: str, limit: int = 20) -> list[dict[str, Any]]:
+    if not db_path.is_file():
+        return []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(f"SELECT * FROM {table} ORDER BY {order_by} DESC LIMIT ?", (limit,)).fetchall()
+    converted: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key, value in list(item.items()):
+            if key.endswith("_json") and isinstance(value, str):
+                item[key.removesuffix("_json")] = json.loads(value)
+                del item[key]
+            elif key == "matches":
+                item[key] = bool(value)
+        converted.append(item)
+    return converted
+
+
+def _write_self_improvement_snapshot_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    path = _runtime_self_improvement_snapshot_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    artifact.setdefault("artifact_path", str(path))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(path, artifact)
+
+
+def self_improvement_snapshot(config: IntegrationConfig | None = None) -> dict[str, Any]:
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    require_runtime_databases(resolved)
+    db_path = _kernel_db_path(resolved)
+    proposals = _self_improvement_rows(db_path, "self_improvement_proposals", "created_at")
+    eval_records = _self_improvement_rows(db_path, "self_improvement_eval_records", "created_at")
+    promotion_packets = _self_improvement_rows(db_path, "self_improvement_promotion_packets", "created_at")
+    rollbacks = _self_improvement_rows(db_path, "self_improvement_rollbacks", "created_at")
+    comparisons = _self_improvement_rows(
+        db_path,
+        "self_improvement_replay_projection_comparisons",
+        "created_at",
+        limit=5,
+    )
+    status_counts: dict[str, int] = {}
+    for proposal in proposals:
+        status = str(proposal.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+    payload = {
+        "available": True,
+        "generated_at": _utc_now(),
+        "kernel_db_path": str(db_path),
+        "artifact_path": str(_runtime_self_improvement_snapshot_path(resolved)),
+        "summary": {
+            "proposal_count": len(proposals),
+            "eval_record_count": len(eval_records),
+            "promotion_packet_count": len(promotion_packets),
+            "rollback_count": len(rollbacks),
+            "status_counts": status_counts,
+            "latest_replay_projection_match": comparisons[0]["matches"] if comparisons else None,
+        },
+        "proposals": proposals,
+        "eval_records": eval_records,
+        "promotion_packets": promotion_packets,
+        "rollbacks": rollbacks,
+        "comparisons": comparisons,
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "active_behavior_mutation",
+            "policy_mutation",
+            "holdout_mutation",
+            "autonomous_promotion",
+            "side_effect_replay",
+        ],
+    }
+    _write_self_improvement_snapshot_artifact(resolved, payload)
+    return payload
+
+
 def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[str, Any]:
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     kernel_db = _kernel_db_path(resolved)
@@ -2444,6 +2523,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
         "readiness_suite_command": _command_string(config, "--readiness-suite", repo_root),
+        "self_improvement_snapshot_command": _command_string(config, "--self-improvement-snapshot", repo_root),
         "dashboard_surfaces": list(EXPECTED_DASHBOARD_SURFACES),
         "dashboard_mode": "hermes_native",
         "custom_dashboard_plugin": False,
@@ -2456,6 +2536,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "migration_readiness",
             "pre_hermes_readiness",
             "readiness_suite",
+            "self_improvement_snapshot",
         ],
     }
     local_provider_doc = {
@@ -2620,6 +2701,21 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_self_improvement_snapshot_artifact(
+        config,
+        {
+            "available": True,
+            "status": "EMPTY",
+            "command": _command_string(config, "--self-improvement-snapshot", repo_root),
+            "summary": {
+                "proposal_count": 0,
+                "eval_record_count": 0,
+                "promotion_packet_count": 0,
+                "rollback_count": 0,
+            },
+            "live_controls_enabled": False,
+        },
+    )
     _runtime_operator_validation_checklist_path(config).write_text(
         "\n".join(checklist_lines) + "\n",
         encoding="utf-8",
@@ -2709,6 +2805,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
+        "self_improvement_snapshot_path": str(_runtime_self_improvement_snapshot_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
             "custom_plugin": False,
@@ -2744,6 +2841,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "migration_readiness": _command_string(resolved, "--migration-readiness", root),
             "pre_hermes_readiness": _command_string(resolved, "--pre-hermes-readiness", root),
+            "self_improvement_snapshot": _command_string(resolved, "--self-improvement-snapshot", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
             "workspace_overview": _command_string(resolved, "--workspace-overview", root),
         },
@@ -2786,6 +2884,7 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
     _write_launcher(launcher_paths["pre_hermes_readiness"], resolved, root, "--pre-hermes-readiness")
+    _write_launcher(launcher_paths["self_improvement_snapshot"], resolved, root, "--self-improvement-snapshot")
     _write_launcher(launcher_paths["milestone_status"], resolved, root, "--milestone-status")
     _write_launcher(launcher_paths["workspace_overview"], resolved, root, "--workspace-overview")
     _write_launcher(launcher_paths["operator_checklist"], resolved, root, "--operator-checklist")
@@ -2920,6 +3019,7 @@ def doctor_runtime(
         "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
         "migration_readiness": _runtime_migration_readiness_path(resolved).is_file(),
         "pre_hermes_readiness": _runtime_pre_hermes_readiness_path(resolved).is_file(),
+        "self_improvement_snapshot": _runtime_self_improvement_snapshot_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
         "doctor_launcher": launcher_paths["doctor"].is_file(),
@@ -2938,6 +3038,7 @@ def doctor_runtime(
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
         "pre_hermes_readiness_launcher": launcher_paths["pre_hermes_readiness"].is_file(),
+        "self_improvement_snapshot_launcher": launcher_paths["self_improvement_snapshot"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
         "workspace_launcher": launcher_paths["workspace"].is_file(),
         "operator_checklist_launcher": launcher_paths["operator_checklist"].is_file(),
@@ -3859,11 +3960,13 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
         "migration_readiness": latest_migration_readiness(resolved),
         "pre_hermes_readiness": latest_pre_hermes_readiness(resolved),
+        "self_improvement_snapshot": self_improvement_snapshot(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "recovery_readiness_path": str(_runtime_recovery_readiness_path(resolved)),
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
+        "self_improvement_snapshot_path": str(_runtime_self_improvement_snapshot_path(resolved)),
         "replay_corpus_export_path": str(_runtime_replay_corpus_export_path(resolved)),
         "optimizer_snapshot_path": str(_runtime_optimizer_snapshot_path(resolved)),
         "harness_candidate_report_path": str(_runtime_harness_candidate_report_path(resolved)),
@@ -6127,6 +6230,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
     parser.add_argument("--readiness-suite", action="store_true", help="Run all read-only pre-Hermes readiness checks and print invariant status")
+    parser.add_argument("--self-improvement-snapshot", action="store_true", help="Print read-only governed self-improvement proposal/eval status")
     parser.add_argument("--milestone-status", action="store_true", help="Print machine-readable milestone build/proof status")
     parser.add_argument("--workspace-overview", action="store_true", help="Print a Hermes Workspace-oriented operator snapshot")
     parser.add_argument("--operator-checklist", action="store_true", help="Print the operator validation checklist path")
@@ -6468,6 +6572,11 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0 if payload["ok"] else 1
+
+    if args.self_improvement_snapshot:
+        payload = self_improvement_snapshot(config=config)
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
 
     if args.operator_workflow:
         result = run_operator_workflow(

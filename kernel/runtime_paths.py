@@ -48,6 +48,7 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "migration_readiness": bin_dir / "migration_readiness.sh",
         "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
+        "self_improvement_snapshot": bin_dir / "self_improvement_snapshot.sh",
         "gateway": bin_dir / "start_gateway.sh",
         "workspace": bin_dir / "start_workspace.sh",
         "operator_checklist": bin_dir / "operator_validation_checklist.sh",
@@ -159,6 +160,10 @@ def _runtime_migration_readiness_path(config: IntegrationConfig) -> Path:
 
 def _runtime_pre_hermes_readiness_path(config: IntegrationConfig) -> Path:
     return runtime_support_artifact_paths(config)["pre_hermes_readiness"]
+
+
+def _runtime_self_improvement_snapshot_path(config: IntegrationConfig) -> Path:
+    return runtime_support_artifact_paths(config)["self_improvement_snapshot"]
 
 
 def _runtime_proxy_audit_log_path(config: IntegrationConfig) -> Path:

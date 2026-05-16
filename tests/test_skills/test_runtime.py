@@ -35,6 +35,7 @@ from skills.runtime import (
     recovery_readiness,
     replay_readiness_report,
     require_runtime_databases,
+    self_improvement_snapshot,
     run_flywheel_drill,
     run_research_cron_proof,
     run_evidence_factory,
@@ -229,6 +230,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["hermes_adapter_readiness_path"]).is_file()
     assert Path(manifest["migration_readiness_path"]).is_file()
     assert Path(manifest["pre_hermes_readiness_path"]).is_file()
+    assert Path(manifest["self_improvement_snapshot_path"]).is_file()
     assert "dashboard_plugins" not in manifest
     assert manifest["dashboard"]["mode"] == "hermes_native"
     assert manifest["dashboard"]["custom_plugin"] is False
@@ -242,7 +244,9 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "Analytics",
     ]
     assert "--readiness-suite" in workspace_manifest["readiness_suite_command"]
+    assert "--self-improvement-snapshot" in workspace_manifest["self_improvement_snapshot_command"]
     assert "readiness_suite" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "self_improvement_snapshot" in workspace_manifest["read_only_readiness_surfaces"]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["repo_contract_version"] == 1
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["routing"]["max_api_spend_usd"] == 0.0
@@ -1175,6 +1179,24 @@ def test_readiness_suite_runs_read_only_invariant_checks(tmp_path):
     assert Path(payload["artifact_path"]).is_file()
 
 
+def test_self_improvement_snapshot_is_read_only_and_surfaces_kernel_counts(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = self_improvement_snapshot(cfg)
+
+    assert payload["available"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["summary"]["proposal_count"] == 0
+    assert payload["summary"]["eval_record_count"] == 0
+    assert "autonomous_promotion" in payload["disabled_live_controls"]
+    assert Path(payload["artifact_path"]).is_file()
+
+
 def test_run_evidence_factory_generates_cross_skill_evidence(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
@@ -1465,6 +1487,33 @@ def test_runtime_main_readiness_suite_prints_json_invariant_status(tmp_path, mon
     assert output["status"] == "passed_read_only_invariants"
     assert output["live_controls_enabled"] is False
     assert output["summary"]["failed_components"] == []
+
+
+def test_runtime_main_self_improvement_snapshot_prints_read_only_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skills.runtime",
+            "--self-improvement-snapshot",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--skills-dir",
+            str(tmp_path / "skills"),
+            "--checkpoints-dir",
+            str(tmp_path / "skills" / "checkpoints"),
+            "--alerts-dir",
+            str(tmp_path / "alerts"),
+        ],
+    )
+
+    exit_code = runtime_main()
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["available"] is True
+    assert output["live_controls_enabled"] is False
+    assert output["summary"]["proposal_count"] == 0
 
 
 def test_runtime_main_reports_runtime_setup_failure_cleanly(tmp_path, monkeypatch, capsys):

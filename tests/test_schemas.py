@@ -502,7 +502,7 @@ class SchemaMigrationDriftTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "kernel.db"
             old_schema = (ROOT / "schemas/kernel.sql").read_text(encoding="utf-8").replace(
-                "'task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact'",
+                "'task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact','self_improvement'",
                 "'task','research_request','decision','project','model','budget','gate','capability','side_effect','policy','artifact'",
             )
             with sqlite3.connect(db_path) as conn:
