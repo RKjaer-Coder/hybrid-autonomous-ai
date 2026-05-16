@@ -69,6 +69,11 @@ from .records import (
     SourcePlan,
     SideEffectIntent,
     SideEffectReceipt,
+    SelfImprovementEvalRecord,
+    SelfImprovementPromotionPacket,
+    SelfImprovementProposal,
+    SelfImprovementReplayProjectionComparison,
+    SelfImprovementRollbackRecord,
     canonical_json,
     new_id,
     now_iso,
@@ -1959,6 +1964,95 @@ def _model_demotion_payload(demotion: Any, routing_state_after: list[dict[str, A
         "decision_id": demotion.decision_id,
         "authority_effect": demotion.authority_effect,
         "created_at": demotion.created_at,
+    }
+
+
+def _self_improvement_proposal_payload(proposal: SelfImprovementProposal) -> dict[str, Any]:
+    return {
+        "proposal_id": proposal.proposal_id,
+        "target_type": proposal.target_type,
+        "target_id": proposal.target_id,
+        "problem_evidence": proposal.problem_evidence,
+        "proposed_change": proposal.proposed_change,
+        "expected_benefit": proposal.expected_benefit,
+        "risk_assessment": proposal.risk_assessment,
+        "eval_plan": proposal.eval_plan,
+        "rollback_plan": proposal.rollback_plan,
+        "authority_required": proposal.authority_required,
+        "proposer_type": proposal.proposer_type,
+        "proposer_id": proposal.proposer_id,
+        "affected_policy_areas": proposal.affected_policy_areas,
+        "data_classes": proposal.data_classes,
+        "status": proposal.status,
+        "created_at": proposal.created_at,
+        "updated_at": proposal.updated_at,
+    }
+
+
+def _self_improvement_eval_payload(record: SelfImprovementEvalRecord) -> dict[str, Any]:
+    return {
+        "eval_id": record.eval_id,
+        "proposal_id": record.proposal_id,
+        "eval_type": record.eval_type,
+        "baseline_ref": record.baseline_ref,
+        "candidate_ref": record.candidate_ref,
+        "dataset_refs": record.dataset_refs,
+        "metrics": record.metrics,
+        "regression_thresholds": record.regression_thresholds,
+        "failure_examples": record.failure_examples,
+        "side_effect_safety": record.side_effect_safety,
+        "status": record.status,
+        "authority_effect": record.authority_effect,
+        "created_at": record.created_at,
+    }
+
+
+def _self_improvement_promotion_payload(packet: SelfImprovementPromotionPacket) -> dict[str, Any]:
+    return {
+        "packet_id": packet.packet_id,
+        "proposal_id": packet.proposal_id,
+        "decision_id": packet.decision_id,
+        "recommendation": packet.recommendation,
+        "required_authority": packet.required_authority,
+        "eval_record_ids": packet.eval_record_ids,
+        "evidence_refs": packet.evidence_refs,
+        "risk_flags": packet.risk_flags,
+        "gate_packet": packet.gate_packet,
+        "default_on_timeout": packet.default_on_timeout,
+        "status": packet.status,
+        "created_at": packet.created_at,
+    }
+
+
+def _self_improvement_rollback_payload(record: SelfImprovementRollbackRecord) -> dict[str, Any]:
+    return {
+        "rollback_id": record.rollback_id,
+        "proposal_id": record.proposal_id,
+        "packet_id": record.packet_id,
+        "previous_ref": record.previous_ref,
+        "rollback_reason": record.rollback_reason,
+        "receipt_ref": record.receipt_ref,
+        "receipt_hash": record.receipt_hash,
+        "status": record.status,
+        "created_at": record.created_at,
+    }
+
+
+def _self_improvement_comparison_payload(comparison: SelfImprovementReplayProjectionComparison) -> dict[str, Any]:
+    return {
+        "comparison_id": comparison.comparison_id,
+        "scope": comparison.scope,
+        "replay_proposals": comparison.replay_proposals,
+        "projection_proposals": comparison.projection_proposals,
+        "replay_eval_records": comparison.replay_eval_records,
+        "projection_eval_records": comparison.projection_eval_records,
+        "replay_promotion_packets": comparison.replay_promotion_packets,
+        "projection_promotion_packets": comparison.projection_promotion_packets,
+        "replay_rollbacks": comparison.replay_rollbacks,
+        "projection_rollbacks": comparison.projection_rollbacks,
+        "matches": comparison.matches,
+        "mismatches": comparison.mismatches,
+        "created_at": comparison.created_at,
     }
 
 

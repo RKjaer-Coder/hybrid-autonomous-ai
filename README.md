@@ -204,6 +204,14 @@ replay/projection comparisons, or disabled live-control invariants drift:
 python3 -m skills.runtime --readiness-suite
 ```
 
+Inspect governed self-improvement proposals, eval evidence, promotion packets,
+rollbacks, and replay/projection comparison state without enabling live
+behavior mutation:
+
+```bash
+python3 -m skills.runtime --self-improvement-snapshot
+```
+
 Export activation-relevant replay traces for offline harness work:
 
 ```bash
@@ -275,6 +283,7 @@ python3 -m skills.runtime --analyze-harness-candidates
 python3 -m skills.runtime --recovery-readiness
 python3 -m skills.runtime --pre-hermes-readiness
 python3 -m skills.runtime --readiness-suite
+python3 -m skills.runtime --self-improvement-snapshot
 python3 -m skills.runtime --bootstrap-live
 python3 -m skills.runtime --mac-studio-day-one
 ```

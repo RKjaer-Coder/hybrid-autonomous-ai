@@ -434,9 +434,11 @@ def _rebuild_operator_heartbeat_for_dashboard_channel(conn: sqlite3.Connection) 
 
 
 def _rebuild_kernel_events_for_research_entities(conn: sqlite3.Connection) -> None:
-    """Rebuild old kernel events CHECK constraints that predate newer research entities."""
+    """Rebuild old kernel events CHECK constraints that predate newer kernel entities."""
     existing_sql = _object_sql(conn, "table", "events")
-    if not existing_sql or ("evidence_bundle" in existing_sql and "source_plan" in existing_sql):
+    if not existing_sql or all(
+        entity in existing_sql for entity in ("evidence_bundle", "source_plan", "self_improvement")
+    ):
         return
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
@@ -448,7 +450,7 @@ def _rebuild_kernel_events_for_research_entities(conn: sqlite3.Connection) -> No
               event_id TEXT NOT NULL UNIQUE,
               event_schema_version INTEGER NOT NULL,
               event_type TEXT NOT NULL,
-              entity_type TEXT NOT NULL CHECK (entity_type IN ('task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact')),
+              entity_type TEXT NOT NULL CHECK (entity_type IN ('task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact','self_improvement')),
               entity_id TEXT NOT NULL,
               transaction_id TEXT NOT NULL,
               command_id TEXT REFERENCES commands(command_id),

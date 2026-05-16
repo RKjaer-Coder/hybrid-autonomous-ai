@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS events (
   event_id TEXT NOT NULL UNIQUE,
   event_schema_version INTEGER NOT NULL,
   event_type TEXT NOT NULL,
-  entity_type TEXT NOT NULL CHECK (entity_type IN ('task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact')),
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('task','research_request','source_plan','evidence_bundle','decision','project','model','budget','gate','capability','side_effect','policy','artifact','self_improvement')),
   entity_id TEXT NOT NULL,
   transaction_id TEXT NOT NULL,
   command_id TEXT REFERENCES commands(command_id),
@@ -724,6 +724,85 @@ CREATE TABLE IF NOT EXISTS model_routing_state (
   UNIQUE(task_class, routing_role)
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS self_improvement_proposals (
+  proposal_id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL CHECK (target_type IN ('harness','workflow','tool','model','eval','policy')),
+  target_id TEXT NOT NULL,
+  problem_evidence_json TEXT NOT NULL CHECK (json_valid(problem_evidence_json)),
+  proposed_change TEXT NOT NULL,
+  expected_benefit TEXT NOT NULL,
+  risk_assessment TEXT NOT NULL,
+  eval_plan TEXT NOT NULL,
+  rollback_plan TEXT NOT NULL,
+  authority_required TEXT NOT NULL CHECK (authority_required IN ('rule','single_agent','council','operator_gate')),
+  proposer_type TEXT NOT NULL CHECK (proposer_type IN ('kernel','operator','agent','tool','model','scheduler')),
+  proposer_id TEXT NOT NULL,
+  affected_policy_areas_json TEXT NOT NULL CHECK (json_valid(affected_policy_areas_json)),
+  data_classes_json TEXT NOT NULL CHECK (json_valid(data_classes_json)),
+  status TEXT NOT NULL CHECK (status IN ('proposed','eval_running','approved','rejected','promoted','rolled_back')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS self_improvement_eval_records (
+  eval_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES self_improvement_proposals(proposal_id),
+  eval_type TEXT NOT NULL CHECK (eval_type IN ('replay','shadow','regression','safety','cost_latency')),
+  baseline_ref TEXT NOT NULL,
+  candidate_ref TEXT NOT NULL,
+  dataset_refs_json TEXT NOT NULL CHECK (json_valid(dataset_refs_json)),
+  metrics_json TEXT NOT NULL CHECK (json_valid(metrics_json)),
+  regression_thresholds_json TEXT NOT NULL CHECK (json_valid(regression_thresholds_json)),
+  failure_examples_json TEXT NOT NULL CHECK (json_valid(failure_examples_json)),
+  side_effect_safety_json TEXT NOT NULL CHECK (json_valid(side_effect_safety_json)),
+  status TEXT NOT NULL CHECK (status IN ('recorded','passed','failed','needs_more_data')),
+  authority_effect TEXT NOT NULL CHECK (authority_effect = 'evidence_only'),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS self_improvement_promotion_packets (
+  packet_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES self_improvement_proposals(proposal_id),
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(decision_id),
+  recommendation TEXT NOT NULL CHECK (recommendation IN ('approve','reject','needs_more_data','rollback')),
+  required_authority TEXT NOT NULL CHECK (required_authority IN ('rule','single_agent','council','operator_gate')),
+  eval_record_ids_json TEXT NOT NULL CHECK (json_valid(eval_record_ids_json)),
+  evidence_refs_json TEXT NOT NULL CHECK (json_valid(evidence_refs_json)),
+  risk_flags_json TEXT NOT NULL CHECK (json_valid(risk_flags_json)),
+  gate_packet_json TEXT NOT NULL CHECK (json_valid(gate_packet_json)),
+  default_on_timeout TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed','gated','decided','cancelled')),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS self_improvement_rollbacks (
+  rollback_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES self_improvement_proposals(proposal_id),
+  packet_id TEXT NOT NULL REFERENCES self_improvement_promotion_packets(packet_id),
+  previous_ref TEXT NOT NULL,
+  rollback_reason TEXT NOT NULL,
+  receipt_ref TEXT,
+  receipt_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('prepared','applied','blocked')),
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS self_improvement_replay_projection_comparisons (
+  comparison_id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  replay_proposals_json TEXT NOT NULL CHECK (json_valid(replay_proposals_json)),
+  projection_proposals_json TEXT NOT NULL CHECK (json_valid(projection_proposals_json)),
+  replay_eval_records_json TEXT NOT NULL CHECK (json_valid(replay_eval_records_json)),
+  projection_eval_records_json TEXT NOT NULL CHECK (json_valid(projection_eval_records_json)),
+  replay_promotion_packets_json TEXT NOT NULL CHECK (json_valid(replay_promotion_packets_json)),
+  projection_promotion_packets_json TEXT NOT NULL CHECK (json_valid(projection_promotion_packets_json)),
+  replay_rollbacks_json TEXT NOT NULL CHECK (json_valid(replay_rollbacks_json)),
+  projection_rollbacks_json TEXT NOT NULL CHECK (json_valid(projection_rollbacks_json)),
+  matches INTEGER NOT NULL CHECK (matches IN (0, 1)),
+  mismatches_json TEXT NOT NULL CHECK (json_valid(mismatches_json)),
+  created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS capability_grants (
   grant_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
@@ -1173,6 +1252,10 @@ CREATE INDEX IF NOT EXISTS idx_model_demotion_records_model ON model_demotion_re
 CREATE INDEX IF NOT EXISTS idx_model_demotion_records_task ON model_demotion_records(task_class, created_at);
 CREATE INDEX IF NOT EXISTS idx_model_routing_state_role ON model_routing_state(task_class, routing_role, status);
 CREATE INDEX IF NOT EXISTS idx_model_routing_state_model ON model_routing_state(active_model_id, replacement_model_id, status);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_proposals_target ON self_improvement_proposals(target_type, target_id, status);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_eval_records_proposal ON self_improvement_eval_records(proposal_id, eval_type, status);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_promotion_packets_proposal ON self_improvement_promotion_packets(proposal_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_improvement_rollbacks_proposal ON self_improvement_rollbacks(proposal_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_capability_grants_subject ON capability_grants(subject_type, subject_id, capability_type, status);
 CREATE INDEX IF NOT EXISTS idx_budgets_owner ON budgets(owner_type, owner_id, status);
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_budget_status ON budget_reservations(budget_id, status);

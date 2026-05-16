@@ -72,6 +72,11 @@ from .records import (
     SourcePlan,
     SideEffectIntent,
     SideEffectReceipt,
+    SelfImprovementEvalRecord,
+    SelfImprovementPromotionPacket,
+    SelfImprovementProposal,
+    SelfImprovementReplayProjectionComparison,
+    SelfImprovementRollbackRecord,
     SourceRecord,
 )
 from .commercial import (
@@ -125,6 +130,10 @@ from .research import (
     retrieval_grant_command,
     source_acquisition_command,
     source_plan_command,
+)
+from .self_improvement import (
+    KernelSelfImprovement,
+    self_improvement_command,
 )
 from .store import (
     LEGACY_BOUNDARIES,
@@ -238,6 +247,12 @@ __all__ = [
     "ShadowOutputSample",
     "SideEffectIntent",
     "SideEffectReceipt",
+    "SelfImprovementEvalRecord",
+    "SelfImprovementPromotionPacket",
+    "SelfImprovementProposal",
+    "SelfImprovementReplayProjectionComparison",
+    "SelfImprovementRollbackRecord",
+    "KernelSelfImprovement",
     "SourceAcquisitionCheck",
     "SourcePlan",
     "SourceRecord",
@@ -287,6 +302,7 @@ __all__ = [
     "project_task_command",
     "retrieval_grant_command",
     "source_acquisition_command",
+    "self_improvement_command",
     "source_plan_command",
     "verify_runtime_databases",
     "verify_kernel_backup",
