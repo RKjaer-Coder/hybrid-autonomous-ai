@@ -34,8 +34,12 @@ from skills.runtime import (
     make_session_context,
     main as runtime_main,
     migration_readiness,
+    first_live_project_packet,
+    hermes_adapter_gauntlet,
+    model_shadow_ops,
     migrate_runtime_databases,
     optimizer_snapshot,
+    pre_live_mission_control,
     pre_hermes_readiness,
     prepare_runtime_directories,
     readiness_suite,
@@ -238,6 +242,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["hermes_adapter_readiness_path"]).is_file()
     assert Path(manifest["migration_readiness_path"]).is_file()
     assert Path(manifest["pre_hermes_readiness_path"]).is_file()
+    assert Path(manifest["pre_live_mission_control_path"]).is_file()
+    assert Path(manifest["hermes_adapter_gauntlet_path"]).is_file()
+    assert Path(manifest["first_live_project_packet_path"]).is_file()
+    assert Path(manifest["model_shadow_ops_path"]).is_file()
     assert Path(manifest["self_improvement_snapshot_path"]).is_file()
     assert "dashboard_plugins" not in manifest
     assert manifest["dashboard"]["mode"] == "hermes_native"
@@ -252,9 +260,17 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "Analytics",
     ]
     assert "--readiness-suite" in workspace_manifest["readiness_suite_command"]
+    assert "--pre-live-mission-control" in workspace_manifest["pre_live_mission_control_command"]
+    assert "--hermes-adapter-gauntlet" in workspace_manifest["hermes_adapter_gauntlet_command"]
+    assert "--first-live-project-packet" in workspace_manifest["first_live_project_packet_command"]
+    assert "--model-shadow-ops" in workspace_manifest["model_shadow_ops_command"]
     assert "--self-improvement-evidence-pipeline" in workspace_manifest["self_improvement_evidence_pipeline_command"]
     assert "--self-improvement-snapshot" in workspace_manifest["self_improvement_snapshot_command"]
     assert "readiness_suite" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "pre_live_mission_control" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "hermes_adapter_gauntlet" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "first_live_project_packet" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "model_shadow_ops" in workspace_manifest["read_only_readiness_surfaces"]
     assert "self_improvement_evidence_pipeline" in workspace_manifest["read_only_readiness_surfaces"]
     assert "self_improvement_snapshot" in workspace_manifest["read_only_readiness_surfaces"]
     assert profile_config["skills"]["config"]["hybrid_autonomous_ai"]["profile_name"] == "hybrid-test"
@@ -1187,6 +1203,122 @@ def test_readiness_suite_runs_read_only_invariant_checks(tmp_path):
     assert all(item["ok"] for item in by_component.values())
     assert by_component["migration_readiness"]["checks"]["comparison_matches"] is True
     assert by_component["hermes_adapter_readiness"]["checks"]["live_controls_disabled"] is True
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_hermes_adapter_gauntlet_covers_v013_surfaces_without_authority(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = hermes_adapter_gauntlet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:04:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["summary"]["surface_count"] == 10
+    assert payload["summary"]["authority_boundary_case_count"] == 8
+    assert payload["summary"]["all_surfaces_covered"] is True
+    assert payload["live_controls_enabled"] is False
+    assert payload["activation_effect"] == "none"
+    assert all(item["live_controls_enabled"] is False for item in payload["surface_matrix"])
+    assert {item["surface"] for item in payload["surface_matrix"]} >= {
+        "kanban_worker_lifecycle",
+        "goal_checkpoint_gateway_resume",
+        "provider_plugins_and_model_profiles",
+        "break_glass_halt",
+    }
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_first_live_project_packet_is_productized_local_only_loop(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = first_live_project_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:05:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["summary"]["ready_for_target_machine_fixture"] is True
+    assert payload["summary"]["phase_count"] == 4
+    assert payload["summary"]["cloud_spend_cap_usd"] == 0.0
+    assert payload["summary"]["external_commitments_allowed"] is False
+    assert payload["artifact_contract"]["artifact_name"] == "operator_digest_readiness_handoff_pack"
+    assert payload["artifact_contract"]["external_delivery"] == "prepared_intent_only_until_operator_gate"
+    assert [item["phase"] for item in payload["workflow"]] == ["validate", "build", "ship", "operate"]
+    assert all(item["external_side_effects_executed"] is False for item in payload["workflow"])
+    assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_model_shadow_ops_packet_preserves_shadow_only_authority(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = model_shadow_ops(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:06:00+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["summary"]["seed_task_class_count"] == 3
+    assert payload["summary"]["shadow_mode_only"] is True
+    assert payload["summary"]["live_route_mutation_enabled"] is False
+    assert payload["summary"]["operator_gate_required_for_promotion"] is True
+    assert "model_route_promotion" in payload["blocked_autonomous_actions"]
+    assert payload["kernel_counts"]["local_route_decisions"] == 0
+    assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_mission_control_composes_high_value_packets(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = pre_live_mission_control(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:07:00+00:00",
+        candidate_limit=2,
+    )
+
+    assert payload["available"] is True
+    assert payload["go_no_go"] == "ready_for_target_machine_validation"
+    assert payload["summary"]["readiness_suite_ok"] is True
+    assert payload["summary"]["all_adapter_surfaces_covered"] is True
+    assert payload["summary"]["first_live_project_ready"] is True
+    assert payload["summary"]["model_shadow_live_route_mutation"] is False
+    assert set(payload["components"]) == {
+        "readiness_suite",
+        "self_improvement",
+        "first_live_project",
+        "hermes_adapter_gauntlet",
+        "model_shadow_ops",
+        "known_bad_manual_patch_gate",
+    }
+    assert payload["live_controls_enabled"] is False
+    assert "autonomous_patch_application" in payload["disabled_live_controls"]
     assert Path(payload["artifact_path"]).is_file()
 
 

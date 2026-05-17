@@ -31,6 +31,10 @@ SUPPORT_ARTIFACT_FILENAMES = {
     "hermes_adapter_readiness": "hermes_adapter_readiness.json",
     "migration_readiness": "migration_readiness.json",
     "pre_hermes_readiness": "pre_hermes_readiness.json",
+    "pre_live_mission_control": "pre_live_mission_control.json",
+    "hermes_adapter_gauntlet": "hermes_adapter_gauntlet.json",
+    "first_live_project_packet": "first_live_project_packet.json",
+    "model_shadow_ops": "model_shadow_ops.json",
     "self_improvement_snapshot": "self_improvement_snapshot.json",
 }
 
@@ -76,6 +80,10 @@ def _runtime_launcher_paths(config: IntegrationConfig) -> dict[str, Path]:
         "hermes_adapter_readiness": bin_dir / "hermes_adapter_readiness.sh",
         "migration_readiness": bin_dir / "migration_readiness.sh",
         "pre_hermes_readiness": bin_dir / "pre_hermes_readiness.sh",
+        "pre_live_mission_control": bin_dir / "pre_live_mission_control.sh",
+        "hermes_adapter_gauntlet": bin_dir / "hermes_adapter_gauntlet.sh",
+        "first_live_project_packet": bin_dir / "first_live_project_packet.sh",
+        "model_shadow_ops": bin_dir / "model_shadow_ops.sh",
         "self_improvement_evidence_pipeline": bin_dir / "self_improvement_evidence_pipeline.sh",
         "self_improvement_snapshot": bin_dir / "self_improvement_snapshot.sh",
         "gateway": bin_dir / "start_gateway.sh",

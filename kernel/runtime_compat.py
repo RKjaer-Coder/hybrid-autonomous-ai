@@ -69,6 +69,7 @@ from kernel.projections import (
 )
 from migrate import LEGACY_SCHEMAS as SCHEMAS, apply_schema, verify_database
 from runtime_control import RuntimeControlManager
+from eval.fixtures.live_project_handoff import generate_first_live_project_test_set
 from skills.bootstrap import BootstrapOrchestrator
 from skills.config import IntegrationConfig
 from skills.db_manager import DatabaseManager
@@ -161,6 +162,10 @@ def _utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _record_payload(record: Any) -> dict[str, Any]:
+    return record if isinstance(record, dict) else asdict(record)
 
 
 def _mock_council_synthesis(
@@ -496,6 +501,10 @@ from kernel.runtime_paths import (
     _runtime_operator_validation_checklist_path,
     _runtime_optimizer_snapshot_path,
     _runtime_pre_hermes_readiness_path,
+    _runtime_pre_live_mission_control_path,
+    _runtime_hermes_adapter_gauntlet_path,
+    _runtime_first_live_project_packet_path,
+    _runtime_model_shadow_ops_path,
     _runtime_profile_config_path,
     _runtime_profile_dir,
     _runtime_profile_manifest_path,
@@ -1165,14 +1174,47 @@ def recovery_readiness(
         scope=scope,
         as_of=timestamp,
     )
+    packet_payload = _record_payload(packet)
+    if "packet_id" not in packet_payload:
+        with sqlite3.connect(kernel_db) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM recovery_readiness_packets WHERE scope=? AND as_of=? ORDER BY created_at DESC LIMIT 1",
+                (scope, timestamp),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("recovery readiness idempotent command did not leave a packet row")
+        packet_payload = {
+            "packet_id": row["packet_id"],
+            "scope": row["scope"],
+            "as_of": row["as_of"],
+            "backup_cadence_summary": json.loads(row["backup_cadence_summary_json"]),
+            "restore_drill_summary": json.loads(row["restore_drill_summary_json"]),
+            "encrypted_payload_descriptor_summary": json.loads(row["encrypted_payload_descriptor_summary_json"]),
+            "payload_access_failure_summary": json.loads(row["payload_access_failure_summary_json"]),
+            "fail_closed_state": json.loads(row["fail_closed_state_json"]),
+            "next_operator_actions": json.loads(row["next_operator_actions_json"]),
+            "readiness_status": row["readiness_status"],
+            "evidence_refs": json.loads(row["evidence_refs_json"]),
+            "live_controls_enabled": bool(row["live_controls_enabled"]),
+            "created_at": row["created_at"],
+        }
     comparison = store.compare_recovery_readiness_replay_to_projection(
-        _kernel_command("recovery.readiness_compare", f"{packet.packet_id}:projection"),
-        packet.packet_id,
+        _kernel_command("recovery.readiness_compare", f"{packet_payload['packet_id']}:projection"),
+        packet_payload["packet_id"],
     )
+    comparison_payload = _record_payload(comparison)
+    if "matches" not in comparison_payload:
+        comparison_payload = _latest_kernel_comparison_row(
+            kernel_db,
+            "recovery_readiness_replay_projection_comparisons",
+            "packet_id",
+            str(packet_payload["packet_id"]),
+        ) or comparison_payload
     payload = {
         "available": True,
-        "packet": asdict(packet),
-        "comparison": asdict(comparison),
+        "packet": packet_payload,
+        "comparison": comparison_payload,
         "kernel_db_path": str(kernel_db),
         "profile_manifest_path": str(_runtime_profile_manifest_path(resolved)),
         "workspace_manifest_path": str(_runtime_workspace_manifest_path(resolved)),
@@ -1240,14 +1282,52 @@ def hermes_adapter_readiness(
         reconciliation_checks=reconciliation_checks,
         recovery_readiness_packet_id=recovery_packet_id,
     )
+    packet_payload = _record_payload(packet)
+    if "packet_id" not in packet_payload:
+        with sqlite3.connect(kernel_db) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT *
+                FROM hermes_adapter_readiness_packets
+                WHERE adapter_name=? AND hermes_version=? AND as_of=?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (adapter_name, hermes_version, timestamp),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Hermes adapter readiness idempotent command did not leave a packet row")
+        packet_payload = {
+            "packet_id": row["packet_id"],
+            "adapter_name": row["adapter_name"],
+            "hermes_version": row["hermes_version"],
+            "as_of": row["as_of"],
+            "surface_checks": json.loads(row["surface_checks_json"]),
+            "reconciliation_checks": json.loads(row["reconciliation_checks_json"]),
+            "recovery_readiness_packet_id": row["recovery_readiness_packet_id"],
+            "next_operator_actions": json.loads(row["next_operator_actions_json"]),
+            "readiness_status": row["readiness_status"],
+            "evidence_refs": json.loads(row["evidence_refs_json"]),
+            "live_controls_enabled": bool(row["live_controls_enabled"]),
+            "created_at": row["created_at"],
+        }
     comparison = store.compare_hermes_adapter_readiness_replay_to_projection(
-        _kernel_command("hermes.adapter_readiness_compare", f"{packet.packet_id}:projection"),
-        packet.packet_id,
+        _kernel_command("hermes.adapter_readiness_compare", f"{packet_payload['packet_id']}:projection"),
+        packet_payload["packet_id"],
     )
+    comparison_payload = _record_payload(comparison)
+    if "matches" not in comparison_payload:
+        comparison_payload = _latest_kernel_comparison_row(
+            kernel_db,
+            "hermes_adapter_readiness_replay_projection_comparisons",
+            "packet_id",
+            str(packet_payload["packet_id"]),
+        ) or comparison_payload
     payload = {
         "available": True,
-        "packet": asdict(packet),
-        "comparison": asdict(comparison),
+        "packet": packet_payload,
+        "comparison": comparison_payload,
         "recovery_readiness": latest_recovery,
         "recovery_readiness_artifact_path": recovery_payload["artifact_path"],
         "kernel_db_path": str(kernel_db),
@@ -1867,6 +1947,362 @@ def readiness_suite(
         "live_controls_enabled": False,
         "disabled_live_controls": list(pre_hermes["disabled_live_controls"]),
     }
+    return payload
+
+
+def _write_pre_live_mission_control_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_pre_live_mission_control_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_pre_live_mission_control_path(config), artifact)
+
+
+def _write_hermes_adapter_gauntlet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_hermes_adapter_gauntlet_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_hermes_adapter_gauntlet_path(config), artifact)
+
+
+def _write_first_live_project_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_first_live_project_packet_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_first_live_project_packet_path(config), artifact)
+
+
+def _write_model_shadow_ops_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_model_shadow_ops_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_model_shadow_ops_path(config), artifact)
+
+
+def _status_rank(status: str) -> int:
+    return {
+        "blocked": 0,
+        "fail_closed": 0,
+        "failed_read_only_invariants": 0,
+        "action_required": 1,
+        "ready_for_target_machine_validation": 2,
+        "passed_read_only_invariants": 2,
+        "ready": 3,
+    }.get(status, 1)
+
+
+def _component_status(payload: dict[str, Any]) -> str:
+    status = payload.get("status")
+    if isinstance(status, str):
+        return status
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("status"), str):
+        return str(summary["status"])
+    packet = payload.get("packet")
+    if isinstance(packet, dict) and isinstance(packet.get("readiness_status"), str):
+        return str(packet["readiness_status"])
+    return "action_required" if payload.get("available") else "blocked"
+
+
+def pre_live_mission_control(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    candidate_limit: int = 3,
+) -> dict[str, Any]:
+    """Create the single read-only pre-live operator go/no-go packet."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    timestamp = as_of or _utc_now()
+    suite = readiness_suite(resolved, repo_root=str(root), as_of=timestamp)
+    self_improvement = self_improvement_snapshot(resolved)
+    project_packet = first_live_project_packet(resolved, repo_root=str(root), as_of=timestamp)
+    adapter_gauntlet = hermes_adapter_gauntlet(resolved, repo_root=str(root), as_of=timestamp)
+    model_shadow = model_shadow_ops(resolved, repo_root=str(root), as_of=timestamp)
+    patch_gate = _read_json_yaml(_runtime_known_bad_hardening_operator_patch_gate_path(resolved)) or {
+        "available": False,
+        "status": "manual_patch_gate_not_run",
+        "artifact_path": str(_runtime_known_bad_hardening_operator_patch_gate_path(resolved)),
+        "live_controls_enabled": False,
+    }
+    components = {
+        "readiness_suite": suite,
+        "self_improvement": self_improvement,
+        "first_live_project": project_packet,
+        "hermes_adapter_gauntlet": adapter_gauntlet,
+        "model_shadow_ops": model_shadow,
+        "known_bad_manual_patch_gate": patch_gate,
+    }
+    component_status = {name: _component_status(payload) for name, payload in components.items()}
+    go_no_go = "blocked"
+    if suite.get("ok") and project_packet["summary"]["ready_for_target_machine_fixture"] and adapter_gauntlet["summary"]["all_surfaces_covered"]:
+        go_no_go = "ready_for_target_machine_validation"
+    if any(_status_rank(status) == 0 for status in component_status.values()):
+        go_no_go = "blocked"
+    payload = {
+        "available": True,
+        "generated_at": timestamp,
+        "packet_name": "pre_live_mission_control",
+        "go_no_go": go_no_go,
+        "summary": {
+            "component_status": component_status,
+            "readiness_suite_ok": bool(suite.get("ok")),
+            "all_adapter_surfaces_covered": adapter_gauntlet["summary"]["all_surfaces_covered"],
+            "first_live_project_ready": project_packet["summary"]["ready_for_target_machine_fixture"],
+            "model_shadow_live_route_mutation": model_shadow["summary"]["live_route_mutation_enabled"],
+            "known_bad_patch_gate_available": bool(patch_gate.get("available")),
+        },
+        "components": components,
+        "next_operator_actions": [
+            "refresh local git metadata outside the locked sandbox",
+            "carry this packet to target-machine Hermes validation",
+            "keep live controls disabled until target-machine evidence passes",
+            "apply known-bad patch packets only through manual review and normal code review",
+        ],
+        "kernel_db_path": str(_kernel_db_path(resolved)),
+        "artifact_path": str(_runtime_pre_live_mission_control_path(resolved)),
+        "live_controls_enabled": False,
+        "disabled_live_controls": [
+            "live_hermes_attachment",
+            "dashboard_write_controls",
+            "customer_commitments",
+            "paid_provider_calls",
+            "model_route_promotion",
+            "autonomous_patch_application",
+            "side_effect_replay",
+        ],
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_pre_live_mission_control_artifact(resolved, payload)
+    return payload
+
+
+def hermes_adapter_gauntlet(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create the repo-local v0.13 adapter certification matrix."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    install_runtime_profile(resolved, repo_root=str(root))
+    test_set = generate_first_live_project_test_set()
+    harness = test_set["hermes_adapter_validation_harness"]
+    boundary = test_set["authority_boundary_gauntlet"]
+    readiness = hermes_adapter_readiness(resolved, repo_root=str(root), as_of=as_of)
+    matrix = []
+    for check in harness["checks"]:
+        matrix.append(
+            {
+                "check_id": check["check_id"],
+                "surface": check["surface"],
+                "status": "pending_target_machine_evidence",
+                "kernel_evidence": list(check["kernel_evidence"]),
+                "authority_effect": check["authority_effect"],
+                "live_controls_enabled": False,
+                "activation_effect": "none_until_live_evidence_reconciles",
+            }
+        )
+    adversarial = []
+    for case in boundary["cases"]:
+        adversarial.append(
+            {
+                "boundary_case_id": case["boundary_case_id"],
+                "attempted_action": case["attempted_action"],
+                "expected_verdict": case["expected_verdict"],
+                "required_kernel_guard": case["required_kernel_guard"],
+                "status": "repo_fixture_defined",
+                "live_controls_enabled": False,
+            }
+        )
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "hermes_adapter_gauntlet",
+        "hermes_version_floor": harness["hermes_version_floor"],
+        "target_environment": harness["target_environment"],
+        "summary": {
+            "surface_count": len(matrix),
+            "authority_boundary_case_count": len(adversarial),
+            "all_surfaces_covered": len(matrix) == 10,
+            "live_controls_enabled": False,
+            "readiness_status": _component_status(readiness),
+        },
+        "surface_matrix": matrix,
+        "authority_boundary_cases": adversarial,
+        "readiness_packet": readiness.get("packet"),
+        "readiness_artifact_path": readiness.get("artifact_path"),
+        "pass_rule": harness["pass_rule"],
+        "failure_rule": harness["failure_rule"],
+        "artifact_path": str(_runtime_hermes_adapter_gauntlet_path(resolved)),
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_hermes_adapter_gauntlet_artifact(resolved, payload)
+    return payload
+
+
+def first_live_project_packet(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create the productized first-live-project packet from the deterministic fixture."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    install_runtime_profile(resolved, repo_root=str(root))
+    test_set = generate_first_live_project_test_set()
+    fixture = test_set["fixture"]
+    dry_run = test_set["dry_run"]
+    artifact_contract = {
+        "artifact_name": "operator_digest_readiness_handoff_pack",
+        "format": "local_kernel_owned_packet",
+        "sections": [
+            "gates_needing_action",
+            "active_project_status",
+            "blocked_work",
+            "research_findings",
+            "model_routing_changes",
+            "spend_and_budget",
+            "operator_load",
+            "system_health",
+        ],
+        "external_delivery": "prepared_intent_only_until_operator_gate",
+    }
+    workflow = []
+    for phase in dry_run["phases"]:
+        workflow.append(
+            {
+                "phase": phase["phase"],
+                "task_id": phase["task_id"],
+                "event_before_projection": phase["event_before_projection"],
+                "capability_grants_required": list(phase["capability_grants_required"]),
+                "blocked_capabilities": list(phase["blocked_capabilities"]),
+                "external_side_effects_executed": False,
+                "operator_gate_required": phase["phase"] in {"validate", "ship", "operate"},
+            }
+        )
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "first_live_project_packet",
+        "fixture_id": fixture["fixture_id"],
+        "project": fixture["project"],
+        "artifact_contract": artifact_contract,
+        "workflow": workflow,
+        "dry_run": dry_run,
+        "acceptance_criteria": fixture["acceptance_criteria"],
+        "side_effect_expectations": fixture["side_effect_expectations"],
+        "summary": {
+            "ready_for_target_machine_fixture": True,
+            "phase_count": len(workflow),
+            "cloud_spend_cap_usd": fixture["project"]["cloud_spend_cap_usd"],
+            "external_commitments_allowed": fixture["project"]["external_commitments_allowed"],
+            "local_artifact_only": dry_run["acceptance"]["local_artifact_only"],
+        },
+        "artifact_path": str(_runtime_first_live_project_packet_path(resolved)),
+        "live_controls_enabled": False,
+        "activation_effect": "none_until_live_hermes_worker_attached",
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_first_live_project_packet_artifact(resolved, payload)
+    return payload
+
+
+def _sqlite_count(db_path: Path, table_name: str) -> int:
+    if not db_path.is_file():
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        try:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+        except sqlite3.OperationalError:
+            return 0
+
+
+def model_shadow_ops(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create the seed Model Intelligence shadow-ops packet without promotion."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    install_runtime_profile(resolved, repo_root=str(root))
+    require_runtime_databases(resolved)
+    db_path = _kernel_db_path(resolved)
+    task_class_counts = _sqlite_count(db_path, "model_task_classes")
+    candidate_counts = _sqlite_count(db_path, "model_candidates")
+    eval_run_counts = _sqlite_count(db_path, "model_eval_runs")
+    route_decision_counts = _sqlite_count(db_path, "model_route_decisions")
+    promotion_packet_counts = _sqlite_count(db_path, "model_promotion_decision_packets")
+    local_route_count = 0
+    if db_path.is_file():
+        with sqlite3.connect(db_path) as conn:
+            try:
+                local_route_count = int(
+                    conn.execute("SELECT COUNT(*) FROM model_route_decisions WHERE selected_route='local'").fetchone()[0]
+                )
+            except sqlite3.OperationalError:
+                local_route_count = 0
+    seed_task_classes = [
+        "quick_research_summarization",
+        "source_claim_extraction",
+        "coding_small_patch",
+    ]
+    eval_lane = [
+        {
+            "task_class": task_class,
+            "required_records": [
+                "model_task_class",
+                "holdout_policy",
+                "local_offload_eval_set",
+                "shadow_eval_run",
+                "shadow_route_decision",
+                "operator_gated_promotion_packet",
+            ],
+            "promotion_authority": "operator_gate",
+            "production_route_effect": "unchanged",
+        }
+        for task_class in seed_task_classes
+    ]
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "model_shadow_ops",
+        "seed_task_classes": seed_task_classes,
+        "eval_lane": eval_lane,
+        "kernel_counts": {
+            "model_task_classes": task_class_counts,
+            "model_candidates": candidate_counts,
+            "model_eval_runs": eval_run_counts,
+            "model_route_decisions": route_decision_counts,
+            "model_promotion_decision_packets": promotion_packet_counts,
+            "local_route_decisions": local_route_count,
+        },
+        "summary": {
+            "seed_task_class_count": len(seed_task_classes),
+            "shadow_mode_only": True,
+            "live_route_mutation_enabled": False,
+            "operator_gate_required_for_promotion": True,
+            "local_first_earned_by_evals": True,
+        },
+        "blocked_autonomous_actions": [
+            "model_route_promotion",
+            "paid_provider_credential_access",
+            "holdout_mutation",
+            "production_route_mutation",
+            "broad_task_class_expansion",
+        ],
+        "artifact_path": str(_runtime_model_shadow_ops_path(resolved)),
+        "live_controls_enabled": False,
+        "activation_effect": "shadow_evidence_only",
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_model_shadow_ops_artifact(resolved, payload)
     return payload
 
 
@@ -3586,6 +4022,10 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "migration_readiness_command": _command_string(config, "--migration-readiness", repo_root),
         "pre_hermes_readiness_command": _command_string(config, "--pre-hermes-readiness", repo_root),
         "readiness_suite_command": _command_string(config, "--readiness-suite", repo_root),
+        "pre_live_mission_control_command": _command_string(config, "--pre-live-mission-control", repo_root),
+        "hermes_adapter_gauntlet_command": _command_string(config, "--hermes-adapter-gauntlet", repo_root),
+        "first_live_project_packet_command": _command_string(config, "--first-live-project-packet", repo_root),
+        "model_shadow_ops_command": _command_string(config, "--model-shadow-ops", repo_root),
         "self_improvement_evidence_pipeline_command": _command_string(
             config,
             "--self-improvement-evidence-pipeline",
@@ -3604,6 +4044,10 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "migration_readiness",
             "pre_hermes_readiness",
             "readiness_suite",
+            "pre_live_mission_control",
+            "hermes_adapter_gauntlet",
+            "first_live_project_packet",
+            "model_shadow_ops",
             "self_improvement_evidence_pipeline",
             "self_improvement_snapshot",
             "known_bad_hardening_shadow_report",
@@ -3775,6 +4219,42 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_pre_live_mission_control_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--pre-live-mission-control", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_hermes_adapter_gauntlet_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--hermes-adapter-gauntlet", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_first_live_project_packet_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--first-live-project-packet", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_model_shadow_ops_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--model-shadow-ops", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
     _write_self_improvement_snapshot_artifact(
         config,
         {
@@ -3879,6 +4359,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "hermes_adapter_readiness_path": str(_runtime_hermes_adapter_readiness_path(resolved)),
         "migration_readiness_path": str(_runtime_migration_readiness_path(resolved)),
         "pre_hermes_readiness_path": str(_runtime_pre_hermes_readiness_path(resolved)),
+        "pre_live_mission_control_path": str(_runtime_pre_live_mission_control_path(resolved)),
+        "hermes_adapter_gauntlet_path": str(_runtime_hermes_adapter_gauntlet_path(resolved)),
+        "first_live_project_packet_path": str(_runtime_first_live_project_packet_path(resolved)),
+        "model_shadow_ops_path": str(_runtime_model_shadow_ops_path(resolved)),
         "self_improvement_snapshot_path": str(_runtime_self_improvement_snapshot_path(resolved)),
         "dashboard": {
             "mode": "hermes_native",
@@ -3940,6 +4424,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "hermes_adapter_readiness": _command_string(resolved, "--hermes-adapter-readiness", root),
             "migration_readiness": _command_string(resolved, "--migration-readiness", root),
             "pre_hermes_readiness": _command_string(resolved, "--pre-hermes-readiness", root),
+            "pre_live_mission_control": _command_string(resolved, "--pre-live-mission-control", root),
+            "hermes_adapter_gauntlet": _command_string(resolved, "--hermes-adapter-gauntlet", root),
+            "first_live_project_packet": _command_string(resolved, "--first-live-project-packet", root),
+            "model_shadow_ops": _command_string(resolved, "--model-shadow-ops", root),
             "self_improvement_evidence_pipeline": _command_string(resolved, "--self-improvement-evidence-pipeline", root),
             "self_improvement_snapshot": _command_string(resolved, "--self-improvement-snapshot", root),
             "milestone_status": _command_string(resolved, "--milestone-status", root),
@@ -4008,6 +4496,10 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["hermes_adapter_readiness"], resolved, root, "--hermes-adapter-readiness")
     _write_launcher(launcher_paths["migration_readiness"], resolved, root, "--migration-readiness")
     _write_launcher(launcher_paths["pre_hermes_readiness"], resolved, root, "--pre-hermes-readiness")
+    _write_launcher(launcher_paths["pre_live_mission_control"], resolved, root, "--pre-live-mission-control")
+    _write_launcher(launcher_paths["hermes_adapter_gauntlet"], resolved, root, "--hermes-adapter-gauntlet")
+    _write_launcher(launcher_paths["first_live_project_packet"], resolved, root, "--first-live-project-packet")
+    _write_launcher(launcher_paths["model_shadow_ops"], resolved, root, "--model-shadow-ops")
     _write_launcher(
         launcher_paths["self_improvement_evidence_pipeline"],
         resolved,
@@ -4149,6 +4641,10 @@ def doctor_runtime(
         "hermes_adapter_readiness": _runtime_hermes_adapter_readiness_path(resolved).is_file(),
         "migration_readiness": _runtime_migration_readiness_path(resolved).is_file(),
         "pre_hermes_readiness": _runtime_pre_hermes_readiness_path(resolved).is_file(),
+        "pre_live_mission_control": _runtime_pre_live_mission_control_path(resolved).is_file(),
+        "hermes_adapter_gauntlet": _runtime_hermes_adapter_gauntlet_path(resolved).is_file(),
+        "first_live_project_packet": _runtime_first_live_project_packet_path(resolved).is_file(),
+        "model_shadow_ops": _runtime_model_shadow_ops_path(resolved).is_file(),
         "self_improvement_snapshot": _runtime_self_improvement_snapshot_path(resolved).is_file(),
         "bootstrap_launcher": launcher_paths["bootstrap"].is_file(),
         "bootstrap_stack_launcher": launcher_paths["bootstrap_stack"].is_file(),
@@ -4168,6 +4664,10 @@ def doctor_runtime(
         "hermes_adapter_readiness_launcher": launcher_paths["hermes_adapter_readiness"].is_file(),
         "migration_readiness_launcher": launcher_paths["migration_readiness"].is_file(),
         "pre_hermes_readiness_launcher": launcher_paths["pre_hermes_readiness"].is_file(),
+        "pre_live_mission_control_launcher": launcher_paths["pre_live_mission_control"].is_file(),
+        "hermes_adapter_gauntlet_launcher": launcher_paths["hermes_adapter_gauntlet"].is_file(),
+        "first_live_project_packet_launcher": launcher_paths["first_live_project_packet"].is_file(),
+        "model_shadow_ops_launcher": launcher_paths["model_shadow_ops"].is_file(),
         "self_improvement_evidence_pipeline_launcher": launcher_paths["self_improvement_evidence_pipeline"].is_file(),
         "self_improvement_snapshot_launcher": launcher_paths["self_improvement_snapshot"].is_file(),
         "gateway_launcher": launcher_paths["gateway"].is_file(),
@@ -5091,6 +5591,10 @@ def workspace_overview(config: IntegrationConfig | None = None) -> dict[str, Any
         "hermes_adapter_readiness": latest_hermes_adapter_readiness(resolved),
         "migration_readiness": latest_migration_readiness(resolved),
         "pre_hermes_readiness": latest_pre_hermes_readiness(resolved),
+        "pre_live_mission_control_path": str(_runtime_pre_live_mission_control_path(resolved)),
+        "hermes_adapter_gauntlet_path": str(_runtime_hermes_adapter_gauntlet_path(resolved)),
+        "first_live_project_packet_path": str(_runtime_first_live_project_packet_path(resolved)),
+        "model_shadow_ops_path": str(_runtime_model_shadow_ops_path(resolved)),
         "self_improvement_snapshot": self_improvement_snapshot(resolved),
         "replay_readiness_report_path": str(_runtime_replay_readiness_report_path(resolved)),
         "recovery_readiness_path": str(_runtime_recovery_readiness_path(resolved)),
@@ -7401,6 +7905,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
     parser.add_argument("--readiness-suite", action="store_true", help="Run all read-only pre-Hermes readiness checks and print invariant status")
+    parser.add_argument("--pre-live-mission-control", action="store_true", help="Create the unified pre-live operator go/no-go packet")
+    parser.add_argument("--hermes-adapter-gauntlet", action="store_true", help="Create the repo-local Hermes adapter certification gauntlet")
+    parser.add_argument("--first-live-project-packet", action="store_true", help="Create the productized first-live-project handoff packet")
+    parser.add_argument("--model-shadow-ops", action="store_true", help="Create the seed Model Intelligence shadow-ops packet")
     parser.add_argument(
         "--self-improvement-evidence-pipeline",
         action="store_true",
@@ -7807,6 +8315,39 @@ def _main_impl(
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0 if payload["ok"] else 1
+
+    if args.pre_live_mission_control:
+        payload = pre_live_mission_control(
+            config=config,
+            repo_root=args.repo_root,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["go_no_go"] != "blocked" else 1
+
+    if args.hermes_adapter_gauntlet:
+        payload = hermes_adapter_gauntlet(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.first_live_project_packet:
+        payload = first_live_project_packet(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.model_shadow_ops:
+        payload = model_shadow_ops(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
 
     if args.self_improvement_evidence_pipeline:
         payload = self_improvement_evidence_pipeline(
