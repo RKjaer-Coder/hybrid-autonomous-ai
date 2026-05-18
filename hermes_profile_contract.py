@@ -128,7 +128,12 @@ class HermesProfileContract:
 
     def plugin_hooks_mapping(self) -> dict[str, Any]:
         return {
-            "required_hooks": ["pre_tool_call", "pre_approval_request", "post_approval_response"],
+            "required_hooks": [
+                "pre_tool_call",
+                "pre_approval_request",
+                "post_approval_response",
+                "api_run_approval_event",
+            ],
             "fail_closed_for": ["g3_paid_spend", "sheriff_block", "runtime_halt"],
         }
 
@@ -300,7 +305,7 @@ class HermesProfileContract:
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "curator") or {},
                 self.curator_mapping(),
             ),
-            "plugin_hooks_v012": contains_subset(
+            "approval_boundary_events": contains_subset(
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "plugin_hooks") or {},
                 self.plugin_hooks_mapping(),
             ),
@@ -379,7 +384,7 @@ class HermesProfileContract:
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "curator") or {},
                 self.curator_mapping(),
             ),
-            "plugin_hooks_v012": contains_subset(
+            "approval_boundary_events": contains_subset(
                 nested_get(actual_config_doc or {}, "skills", "config", PROFILE_CONFIG_SKILL_KEY, "plugin_hooks") or {},
                 self.plugin_hooks_mapping(),
             ),

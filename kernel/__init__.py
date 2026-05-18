@@ -123,6 +123,12 @@ from .model_intelligence import (
     default_seed_task_classes,
     model_intelligence_command,
 )
+from .pre_live import (
+    PRE_LIVE_GOALS,
+    PreLiveCompletionBundle,
+    PreLiveGoalStatus,
+    summarize_pre_live_completion,
+)
 from .research import (
     KernelResearchEngine,
     LegacyResearchProjection,
@@ -206,7 +212,10 @@ __all__ = [
     "ModelRouteDecision",
     "ModelTaskClassRecord",
     "OpportunityProjectDecisionPacket",
+    "PRE_LIVE_GOALS",
     "PreparedProviderCall",
+    "PreLiveCompletionBundle",
+    "PreLiveGoalStatus",
     "Project",
     "ProjectArtifactReceipt",
     "ProjectCommercialRollup",
@@ -277,6 +286,7 @@ __all__ = [
     "restore_kernel_backup",
     "runtime_logs_dir",
     "research_request_command",
+    "summarize_pre_live_completion",
     "g1_project_approval_command",
     "project_artifact_receipt_command",
     "project_close_decision_command",

@@ -114,8 +114,8 @@ class FixtureTests(unittest.TestCase):
         handoff = generate_first_live_project_test_set()
         harness = handoff["hermes_adapter_validation_harness"]
         surfaces = {check["surface"] for check in harness["checks"]}
-        self.assertEqual(harness["hermes_version_floor"], "0.13.0")
-        self.assertEqual(len(harness["checks"]), 10)
+        self.assertEqual(harness["hermes_version_floor"], "0.14.0")
+        self.assertEqual(len(harness["checks"]), 20)
         self.assertEqual(
             surfaces,
             {
@@ -123,8 +123,18 @@ class FixtureTests(unittest.TestCase):
                 "goal_checkpoint_gateway_resume",
                 "no_agent_cron_watchdog",
                 "provider_plugins_and_model_profiles",
+                "hermes_openai_compatible_proxy",
+                "live_session_handoff",
+                "api_approval_event_stream",
+                "prompt_cache_route_revalidation",
                 "mcp_sse_oauth_forwarding",
                 "native_dashboard_controls",
+                "watchers_change_detection",
+                "teams_graph_gateway_pipeline",
+                "x_search_external_source",
+                "computer_use_backend",
+                "lsp_write_diagnostics",
+                "plugin_llm_tool_override",
                 "platform_allowlists_redaction_media",
                 "lm_studio_local_provider_routes",
                 "target_machine_recovery",
@@ -153,11 +163,16 @@ class FixtureTests(unittest.TestCase):
         gauntlet = handoff["authority_boundary_gauntlet"]
         cases = gauntlet["cases"]
         self.assertEqual(gauntlet["activation_effect"], "none")
-        self.assertEqual(len(cases), 8)
+        self.assertEqual(len(cases), 13)
         self.assertTrue(all(case["kernel_event_required_before_state_change"] for case in cases))
         self.assertTrue(all(not case["live_controls_enabled"] for case in cases))
         verdict_by_action = {case["attempted_action"]: case["expected_verdict"] for case in cases}
         self.assertEqual(verdict_by_action["provider_plugin_paid_call"], "blocked")
+        self.assertEqual(verdict_by_action["hermes_proxy_oauth_paid_provider_call"], "blocked")
+        self.assertEqual(verdict_by_action["reuse_cross_session_prompt_cache_with_sensitive_context"], "blocked")
+        self.assertEqual(verdict_by_action["use_x_search_as_decision_evidence_without_source_policy"], "research_gate_failed")
+        self.assertEqual(verdict_by_action["drive_gui_with_computer_use_without_task_scope"], "blocked")
+        self.assertEqual(verdict_by_action["plugin_tool_override_calls_builtin_without_kernel_grant"], "blocked")
         self.assertEqual(verdict_by_action["native_dashboard_write_to_operator_gate"], "projection_only")
         self.assertEqual(verdict_by_action["replay_external_message_or_purchase"], "reconstruct_only")
         self.assertEqual(verdict_by_action["promote_local_model_route"], "shadow_only")

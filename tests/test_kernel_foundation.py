@@ -35,6 +35,7 @@ from kernel.projections import (
     compare_operator_digest_migration_readiness_projection,
 )
 from kernel.store import KERNEL_POLICY_VERSION
+from kernel.store_recovery import RecoveryKernelTransactionMixin
 
 
 def command(
@@ -1279,33 +1280,17 @@ class KernelFoundationTests(unittest.TestCase):
         recovery = self.create_ready_recovery_readiness_packet()
         surface_checks = [
             {"surface": surface, "status": "passed", "evidence_refs": [f"proof:{surface}"]}
-            for surface in (
-                "kanban_worker_lifecycle",
-                "dashboard_profile_provider_controls",
-                "provider_plugin_calls",
-                "mcp_sse_oauth_forwarding",
-                "no_agent_cron_watchdog",
-                "gateway_goal_checkpoint_resume",
-                "platform_allowlists_redaction",
-            )
+            for surface in RecoveryKernelTransactionMixin.HERMES_REQUIRED_SURFACES
         ]
         reconciliation_checks = [
             {"check": check, "status": "passed", "evidence_refs": [f"proof:{check}"]}
-            for check in (
-                "kernel_task_status",
-                "assignment_ownership",
-                "grant_status_scope_expiry_use_count",
-                "budget_reservation_status",
-                "side_effect_intent_idempotency_receipt",
-                "policy_version",
-                "operator_halt_quarantine_state",
-            )
+            for check in RecoveryKernelTransactionMixin.HERMES_REQUIRED_RECONCILIATION_CHECKS
         ]
 
         packet = self.store.create_hermes_adapter_readiness_packet(
             command("hermes.adapter_readiness", "hermes-ready", requested_by="kernel"),
-            adapter_name="hermes-v0.13",
-            hermes_version="0.13.0",
+            adapter_name="hermes-v0.14",
+            hermes_version="0.14.0",
             as_of="2026-05-10T00:00:00Z",
             surface_checks=surface_checks,
             reconciliation_checks=reconciliation_checks,
@@ -1339,8 +1324,8 @@ class KernelFoundationTests(unittest.TestCase):
         recovery = self.create_ready_recovery_readiness_packet()
         packet = self.store.create_hermes_adapter_readiness_packet(
             command("hermes.adapter_readiness", "hermes-blocked", requested_by="kernel"),
-            adapter_name="hermes-v0.13",
-            hermes_version="0.13.0",
+            adapter_name="hermes-v0.14",
+            hermes_version="0.14.0",
             as_of="2026-05-10T00:00:00Z",
             surface_checks=[
                 {
@@ -1368,8 +1353,8 @@ class KernelFoundationTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.store.create_hermes_adapter_readiness_packet(
                 command("hermes.adapter_readiness", "agent-hermes-readiness", requested_by="agent"),
-                adapter_name="hermes-v0.13",
-                hermes_version="0.13.0",
+                adapter_name="hermes-v0.14",
+                hermes_version="0.14.0",
                 as_of="2026-05-10T00:00:00Z",
                 surface_checks=[{"surface": "kanban_worker_lifecycle", "status": "passed"}],
                 reconciliation_checks=[{"check": "kernel_task_status", "status": "passed"}],

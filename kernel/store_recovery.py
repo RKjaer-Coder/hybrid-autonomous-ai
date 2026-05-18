@@ -98,16 +98,26 @@ from .store_common import (
 
 
 class RecoveryKernelTransactionMixin:
-    HERMES_V013_REQUIRED_SURFACES = (
+    HERMES_REQUIRED_SURFACES = (
         "kanban_worker_lifecycle",
         "dashboard_profile_provider_controls",
         "provider_plugin_calls",
+        "hermes_openai_compatible_proxy",
+        "live_session_handoff",
+        "api_approval_event_stream",
+        "prompt_cache_route_revalidation",
         "mcp_sse_oauth_forwarding",
         "no_agent_cron_watchdog",
+        "watchers_change_detection",
         "gateway_goal_checkpoint_resume",
+        "teams_graph_gateway_pipeline",
+        "x_search_external_source",
+        "computer_use_backend",
+        "lsp_write_diagnostics",
+        "plugin_llm_tool_override",
         "platform_allowlists_redaction",
     )
-    HERMES_V013_REQUIRED_RECONCILIATION_CHECKS = (
+    HERMES_REQUIRED_RECONCILIATION_CHECKS = (
         "kernel_task_status",
         "assignment_ownership",
         "grant_status_scope_expiry_use_count",
@@ -641,10 +651,10 @@ class RecoveryKernelTransactionMixin:
         surface_by_name = {str(check.get("surface", "")): check for check in surface_checks}
         reconciliation_by_name = {str(check.get("check", "")): check for check in reconciliation_checks}
         missing_surfaces = [
-            surface for surface in self.HERMES_V013_REQUIRED_SURFACES if surface not in surface_by_name
+            surface for surface in self.HERMES_REQUIRED_SURFACES if surface not in surface_by_name
         ]
         missing_reconciliation = [
-            check for check in self.HERMES_V013_REQUIRED_RECONCILIATION_CHECKS if check not in reconciliation_by_name
+            check for check in self.HERMES_REQUIRED_RECONCILIATION_CHECKS if check not in reconciliation_by_name
         ]
         failing_surfaces = [
             name for name, check in surface_by_name.items() if check.get("status") in {"failed", "blocked"}
@@ -683,7 +693,7 @@ class RecoveryKernelTransactionMixin:
                 {
                     "action": "prove_hermes_adapter_surfaces",
                     "required_authority": "operator_gate",
-                    "reason": "One or more Hermes v0.13 adapter surfaces have no proof record.",
+                    "reason": "One or more Hermes adapter surfaces have no proof record.",
                     "refs": missing_surfaces,
                 }
             )
@@ -722,7 +732,7 @@ class RecoveryKernelTransactionMixin:
         )
         readiness_status = "fail_closed" if fail_closed else ("action_required" if actions else "ready")
         evidence_refs = [
-            "spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs",
+            "spec:s08_operator_deployment#Hermes Adapter Proofs",
             *[
                 str(ref)
                 for check in surface_checks + reconciliation_checks
