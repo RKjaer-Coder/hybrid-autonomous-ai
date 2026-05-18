@@ -22,15 +22,15 @@ current blockers, and latest verification, use `../CURRENT_STATE.md`.
 ## Current Posture
 
 The repo is built to harden the control kernel before live Hermes attachment.
-Hermes Agent remains the target execution and operator environment, but live
-Hermes, LM Studio, Mac Studio validation, provider plugins, and dashboard
-authority are still gated until the target machine can prove them.
+Hermes Agent v0.14 remains the target execution and operator environment, but
+live Hermes, local-provider routes, Mac Studio validation, provider plugins,
+and dashboard authority are still gated until the target machine can prove them.
 
-The custom Mission Control server/dashboard plugin has been retired. Operator
-visual workflows should use Hermes Agent's native dashboard surfaces: Kanban,
-agent profiles, analytics, chat, models, and plugin controls. The repo keeps
-the install/profile/runtime contracts, while gates, spend, side effects,
-artifact governance, recovery, and replay remain kernel-owned.
+There is no repo-maintained dashboard product. Operator visual workflows use
+Hermes Agent's native dashboard surfaces: Kanban, agent profiles, analytics,
+chat, models, and plugin controls. The repo keeps only install/profile/runtime
+contracts while gates, spend, side effects, artifact governance, recovery, and
+replay remain kernel-owned.
 
 ## v3.1 Kernel Posture
 
@@ -62,7 +62,7 @@ The highest-level posture is:
   projections
 - retire ignored local artifacts, superseded shims, and repo-maintained UI
   surfaces after tests prove they are unused; the root `bootstrap_patch.py`
-  shim and custom Mission Control dashboard have been retired
+  shim has been retired
 
 ## Common Workflows
 
@@ -178,7 +178,7 @@ adapter validation:
 python3 -m skills.runtime --recovery-readiness
 ```
 
-Create or surface the read-only Hermes v0.13 adapter-readiness packet from
+Create or surface the read-only Hermes v0.14 adapter-readiness packet from
 repo-local proof inputs:
 
 ```bash
@@ -232,7 +232,7 @@ python3 -m skills.runtime --install-profile
 hermes dashboard --no-open
 ```
 
-The repo no longer ships a custom Mission Control server or dashboard plugin.
+The repo no longer ships a repo-maintained dashboard server or dashboard plugin.
 Gate and side-effect authority remains in the kernel/runtime contracts; the
 dashboard is a native Hermes operator surface.
 
@@ -261,10 +261,9 @@ python3 -m skills.runtime --readiness
 ```
 
 Readiness also requires the Council delegate isolation canary, the repo-local
-v0.12 approval-hook adapter contract, the read-only Hermes v0.13
-adapter-readiness packet linked to current recovery-readiness evidence, LM
-Studio/local-provider doctor readiness, and
-`hermes -z` one-shot smoke evidence before Council Tier 1 or paid-capable
+approval boundary contract, the read-only Hermes v0.14 adapter-readiness packet
+linked to current recovery-readiness evidence, local-provider doctor readiness,
+and `hermes -z` one-shot smoke evidence before Council Tier 1 or paid-capable
 operation is treated as launch-safe. The adapter-readiness path never enables
 dashboard write controls, customer commitments, or provider/plugin calls.
 

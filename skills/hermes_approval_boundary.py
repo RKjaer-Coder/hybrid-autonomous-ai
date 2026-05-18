@@ -56,8 +56,8 @@ class ApprovalDecision:
     check_path: tuple[str, ...]
 
 
-class HermesV012ApprovalHookAdapter:
-    """Blocking Hermes v0.12 approval-hook adapter for repo policy checks."""
+class HermesApprovalBoundaryAdapter:
+    """Fail-closed Hermes approval boundary for repo policy checks."""
 
     def __init__(
         self,
@@ -157,6 +157,3 @@ class HermesV012ApprovalHookAdapter:
         if request.project_spend_usd + request.estimated_cost_usd > request.project_budget_cap_usd:
             return PreToolCallDecision(False, "g3_veto:project_cap_exceeded", ("sheriff", "g3"))
         return None
-
-
-HermesV011PreToolCallAdapter = HermesV012ApprovalHookAdapter

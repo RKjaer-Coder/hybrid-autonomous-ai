@@ -55,6 +55,49 @@ _LIVE_VALIDATION_CHECKS = [
         "blocked_without_evidence": True,
     },
     {
+        "surface": "hermes_openai_compatible_proxy",
+        "hermes_input": "oauth_provider_request_through_hermes_proxy",
+        "kernel_evidence": [
+            "capability_grant",
+            "budget_grant",
+            "data_class_grant",
+            "provider_call_intent",
+            "provider_call_receipt",
+            "proxy_audit_record",
+        ],
+        "authority_effect": "oauth_proxy_is_transport_not_spend_or_data_authority",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "live_session_handoff",
+        "hermes_input": "handoff_active_session_to_model_profile_or_persona",
+        "kernel_evidence": [
+            "task_status_revalidated",
+            "assignment_owner_revalidated",
+            "capability_grants_revalidated",
+            "budget_grants_revalidated",
+            "side_effect_idempotency_revalidated",
+            "policy_version_revalidated",
+            "halt_state_revalidated",
+        ],
+        "authority_effect": "handoff_revalidates_before_any_continuation",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "api_approval_event_stream",
+        "hermes_input": "approval_required_event_from_api_run_stream",
+        "kernel_evidence": ["operator_gate_request", "operator_gate_decision", "timeout_default", "audit_record"],
+        "authority_effect": "approval_stream_can_prompt_but_kernel_commits_gate_state",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "prompt_cache_route_revalidation",
+        "hermes_input": "cross_session_prompt_cache_or_cached_provider_prefix",
+        "kernel_evidence": ["fresh_route_decision", "budget_grant", "data_class_grant", "cache_scope_record"],
+        "authority_effect": "cached_context_never_reuses_stale_paid_or_sensitive_authority",
+        "blocked_without_evidence": True,
+    },
+    {
         "surface": "mcp_sse_oauth_forwarding",
         "hermes_input": "mcp_or_oauth_forwarded_request",
         "kernel_evidence": [
@@ -72,6 +115,48 @@ _LIVE_VALIDATION_CHECKS = [
         "hermes_input": "dashboard_profile_plugin_provider_or_kanban_control",
         "kernel_evidence": ["local_auth_check", "timeout_semantics", "replay_semantics", "audit_record"],
         "authority_effect": "read_only_or_projection_only",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "watchers_change_detection",
+        "hermes_input": "watcher_tick_for_rss_http_json_or_github",
+        "kernel_evidence": ["watcher_source_policy", "script_hash", "non_empty_findings", "inspection_or_alert_record"],
+        "authority_effect": "watchers_create_inspection_records_not_autonomous_work",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "teams_graph_gateway_pipeline",
+        "hermes_input": "teams_graph_webhook_or_outbound_delivery",
+        "kernel_evidence": ["platform_allowlist_match", "redaction_applied", "side_effect_intent", "delivery_receipt"],
+        "authority_effect": "teams_gateway_is_notification_transport_until_operator_gate",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "x_search_external_source",
+        "hermes_input": "authenticated_x_search_query",
+        "kernel_evidence": ["research_source_policy", "freshness_record", "source_rights_record", "claim_citation"],
+        "authority_effect": "x_search_outputs_are_research_sources_not_decisions",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "computer_use_backend",
+        "hermes_input": "computer_use_action_from_any_vision_capable_provider",
+        "kernel_evidence": ["capability_grant", "screen_scope_record", "side_effect_intent", "operator_halt_check"],
+        "authority_effect": "gui_control_requires_current_task_scope_and_halt_check",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "lsp_write_diagnostics",
+        "hermes_input": "write_file_or_patch_diagnostic_footer",
+        "kernel_evidence": ["artifact_hash", "mutation_receipt", "diagnostic_record", "test_or_review_decision"],
+        "authority_effect": "diagnostics_are_evidence_not_acceptance_authority",
+        "blocked_without_evidence": True,
+    },
+    {
+        "surface": "plugin_llm_tool_override",
+        "hermes_input": "plugin_ctx_llm_or_tool_override_call",
+        "kernel_evidence": ["plugin_allowlist", "capability_grant", "model_route_decision", "tool_override_audit"],
+        "authority_effect": "plugin_llm_and_override_paths_cannot_bypass_kernel_brokers",
         "blocked_without_evidence": True,
     },
     {
@@ -125,6 +210,41 @@ _AUTHORITY_BOUNDARY_CASES = [
         "missing_evidence": ["fresh_budget_grant", "route_decision_revalidation"],
         "expected_verdict": "blocked",
         "required_kernel_guard": "cached_routes_are_not_authority",
+    },
+    {
+        "case_id": "oauth-proxy-paid-call-without-grant",
+        "attempted_action": "hermes_proxy_oauth_paid_provider_call",
+        "missing_evidence": ["budget_grant", "data_class_grant", "provider_call_receipt"],
+        "expected_verdict": "blocked",
+        "required_kernel_guard": "oauth_proxy_is_not_budget_authority",
+    },
+    {
+        "case_id": "prompt-cache-sensitive-reuse",
+        "attempted_action": "reuse_cross_session_prompt_cache_with_sensitive_context",
+        "missing_evidence": ["cache_scope_record", "fresh_data_class_grant"],
+        "expected_verdict": "blocked",
+        "required_kernel_guard": "prompt_cache_reuses_context_only_after_route_revalidation",
+    },
+    {
+        "case_id": "x-search-without-source-policy",
+        "attempted_action": "use_x_search_as_decision_evidence_without_source_policy",
+        "missing_evidence": ["research_source_policy", "claim_citation"],
+        "expected_verdict": "research_gate_failed",
+        "required_kernel_guard": "external_search_outputs_require_evidence_contracts",
+    },
+    {
+        "case_id": "computer-use-without-scope",
+        "attempted_action": "drive_gui_with_computer_use_without_task_scope",
+        "missing_evidence": ["capability_grant", "screen_scope_record", "operator_halt_check"],
+        "expected_verdict": "blocked",
+        "required_kernel_guard": "computer_use_requires_current_task_scope",
+    },
+    {
+        "case_id": "plugin-tool-override-bypass",
+        "attempted_action": "plugin_tool_override_calls_builtin_without_kernel_grant",
+        "missing_evidence": ["plugin_allowlist", "capability_grant", "tool_override_audit"],
+        "expected_verdict": "blocked",
+        "required_kernel_guard": "tool_override_cannot_bypass_kernel_brokers",
     },
     {
         "case_id": "dashboard-gate-mutation",
@@ -254,7 +374,16 @@ def generate_first_live_project_fixture(seed: int = 517) -> dict:
         "live_validation_surfaces": [
             "hermes_kanban_worker_assignment",
             "hermes_goal_checkpoint_resume_reconciliation",
+            "hermes_handoff_reconciliation",
+            "hermes_proxy_oauth_provider_boundary",
             "no_agent_cron_digest_watchdog",
+            "watchers_change_detection",
+            "api_approval_event_stream",
+            "prompt_cache_route_revalidation",
+            "x_search_research_source_policy",
+            "computer_use_scope_boundary",
+            "lsp_diagnostics_as_advisory_evidence",
+            "plugin_llm_tool_override_boundary",
             "lm_studio_shadow_eval_route",
             "native_dashboard_read_only_projection",
             "break_glass_halt",
@@ -334,7 +463,7 @@ def generate_hermes_adapter_validation_harness(seed: int = 517) -> dict:
     return {
         "name": "hermes_adapter_validation_harness",
         "version": 1,
-        "hermes_version_floor": "0.13.0",
+        "hermes_version_floor": "0.14.0",
         "target_environment": "physical_mac_studio_or_m5",
         "checks": checks,
         "pass_rule": "all_checks_have_kernel_owned_evidence_and_no_blockers",
@@ -405,6 +534,123 @@ def generate_authority_boundary_gauntlet(seed: int = 517) -> dict:
     }
 
 
+def generate_resume_side_effect_replay_fixture(seed: int = 517) -> dict:
+    """Return deterministic R-16 resume and side-effect replay proof cases."""
+
+    f = DeterministicFactory(seed)
+    surfaces = [
+        ("goal_resume", "task_status_revalidated"),
+        ("checkpoint_resume", "assignment_owner_revalidated"),
+        ("gateway_resume", "capability_grants_revalidated"),
+        ("acp_steer", "budget_grants_revalidated"),
+        ("acp_queue_continue", "side_effect_idempotency_revalidated"),
+        ("no_agent_cron", "halt_state_revalidated"),
+        ("provider_plugin_resume", "provider_route_policy_revalidated"),
+        ("mcp_oauth_forward_resume", "scope_timeout_and_media_policy_revalidated"),
+    ]
+    cases = []
+    for surface, decisive_check in surfaces:
+        cases.append(
+            {
+                "case_id": f"resume-r16-{surface}-{f.uuid_v7()}",
+                "surface": surface,
+                "required_reconciliation": [
+                    "task_status_revalidated",
+                    "assignment_owner_revalidated",
+                    "capability_grants_revalidated",
+                    "budget_grants_revalidated",
+                    "side_effect_idempotency_revalidated",
+                    "policy_version_revalidated",
+                    "halt_state_revalidated",
+                ],
+                "decisive_check": decisive_check,
+                "stale_or_failed_check_result": "blocked_before_worker_continuation",
+                "side_effect_replay_result": "reconstruct_intent_and_receipt_only",
+                "external_side_effects_reexecuted": False,
+                "inspection_task_required_on_failure": True,
+                "live_controls_enabled": False,
+            }
+        )
+    return {
+        "name": "r16_resume_side_effect_replay_fixture",
+        "version": 1,
+        "cases": cases,
+        "pass_rule": "every_resume_surface_revalidates_kernel_authority_and_replay_never_reexecutes_external_effects",
+        "activation_effect": "none",
+    }
+
+
+def generate_model_efficiency_service_packet(seed: int = 517) -> dict:
+    """Return the local-only commercial packet for the governed model-efficiency offer."""
+
+    f = DeterministicFactory(seed)
+    return {
+        "packet_id": f"model-efficiency-service-{f.uuid_v7()}",
+        "name": "governed_model_efficiency_service_packet",
+        "version": 1,
+        "offer": {
+            "buyer_profiles": [
+                "ai_native_saas_with_frontier_model_spend",
+                "ai_heavy_agency_with_repeatable_client_workflows",
+                "privacy_sensitive_internal_platform_team",
+            ],
+            "paid_audit_offer": "local-first model-efficiency audit with quality, privacy, spend, and operator-control report",
+            "customer_visible_delivery": "operator_gate_required",
+            "external_side_effects_allowed": False,
+        },
+        "seed_task_classes": [
+            {
+                "task_class": "quick_research_summarization",
+                "frontier_baseline_metric": "quality_adjusted_cost_per_accepted_summary",
+                "local_candidate_metric": "shadow_quality_delta_and_latency",
+            },
+            {
+                "task_class": "source_claim_extraction",
+                "frontier_baseline_metric": "citation_precision_per_dollar",
+                "local_candidate_metric": "claim_extraction_f1_against_holdout",
+            },
+            {
+                "task_class": "coding_small_patch",
+                "frontier_baseline_metric": "verified_patch_cost_per_test_pass",
+                "local_candidate_metric": "focused_test_pass_rate_and_review_defect_rate",
+            },
+        ],
+        "eval_inputs": [
+            "customer_workflow_trace_sample_with_sensitive_payloads_replaced_by_artifact_refs",
+            "frontier_baseline_receipts_and_quality_scores",
+            "local_shadow_outputs",
+            "operator_review_labels",
+            "holdout_cases_for_regression_and_data_leakage",
+        ],
+        "savings_report": {
+            "required_sections": [
+                "current_frontier_spend",
+                "candidate_local_or_cheaper_routes",
+                "quality_delta_by_task_class",
+                "privacy_and_data_residency_constraints",
+                "operator_load_delta",
+                "recommended_shadow_to_promotion_gates",
+            ],
+            "promotion_authority": "operator_gate",
+            "route_mutation_enabled": False,
+        },
+        "kill_criteria": [
+            "no_task_class_reaches_quality_threshold_in_shadow",
+            "operator_load_increases_materially",
+            "savings_under_20_percent_after_quality_adjustment",
+            "privacy_or_audit_requirements_cannot_be_met_locally",
+            "customer_cannot_supply_representative_eval_inputs",
+        ],
+        "kernel_boundaries": {
+            "research_engine_required": True,
+            "model_intelligence_supplies_evidence_only": True,
+            "operator_gate_before_customer_delivery": True,
+            "paid_provider_calls_require_budget_grants": True,
+            "live_controls_enabled": False,
+        },
+    }
+
+
 def generate_first_live_project_test_set(seed: int = 517) -> dict:
     fixture = generate_first_live_project_fixture(seed=seed)
     return {
@@ -415,4 +661,6 @@ def generate_first_live_project_test_set(seed: int = 517) -> dict:
         "hermes_adapter_validation_harness": generate_hermes_adapter_validation_harness(seed=seed),
         "dry_run": generate_first_live_project_dry_run(seed=seed),
         "authority_boundary_gauntlet": generate_authority_boundary_gauntlet(seed=seed),
+        "resume_side_effect_replay_fixture": generate_resume_side_effect_replay_fixture(seed=seed),
+        "model_efficiency_service_packet": generate_model_efficiency_service_packet(seed=seed),
     }

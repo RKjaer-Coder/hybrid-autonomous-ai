@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from immune.types import AlertSeverity, BlockReason, CheckType, ImmuneConfig, ImmuneVerdict, Outcome, Tier, generate_uuid_v7
-from skills.hermes_v011_adapter import ApprovalRequest, ApprovalResponse, HermesV011PreToolCallAdapter, PreToolCallRequest
+from skills.hermes_approval_boundary import ApprovalRequest, ApprovalResponse, HermesApprovalBoundaryAdapter, PreToolCallRequest
 
 
 def test_pre_tool_adapter_vetoes_paid_call_without_g3_budget_before_dispatch():
-    adapter = HermesV011PreToolCallAdapter(
+    adapter = HermesApprovalBoundaryAdapter(
         config=ImmuneConfig(known_tool_registry=frozenset({"paid_model_call"}))
     )
 
@@ -25,7 +25,7 @@ def test_pre_tool_adapter_vetoes_paid_call_without_g3_budget_before_dispatch():
 
 
 def test_pre_tool_adapter_allows_paid_call_inside_session_and_project_budget():
-    adapter = HermesV011PreToolCallAdapter(
+    adapter = HermesApprovalBoundaryAdapter(
         config=ImmuneConfig(known_tool_registry=frozenset({"paid_model_call"}))
     )
 
@@ -50,7 +50,7 @@ def test_pre_tool_adapter_fails_closed_on_policy_error():
     def broken_sheriff(_payload, _config):  # noqa: ANN001
         raise RuntimeError("policy store unavailable")
 
-    adapter = HermesV011PreToolCallAdapter(sheriff_fn=broken_sheriff)
+    adapter = HermesApprovalBoundaryAdapter(sheriff_fn=broken_sheriff)
 
     decision = adapter.pre_tool_call(PreToolCallRequest(session_id=generate_uuid_v7(), skill_name="x", tool_name="y"))
 
@@ -72,7 +72,7 @@ def test_pre_tool_adapter_blocks_sheriff_verdicts():
             alert_severity=AlertSeverity.IMMUNE_BLOCK_FAST,
         )
 
-    adapter = HermesV011PreToolCallAdapter(sheriff_fn=blocking_sheriff)
+    adapter = HermesApprovalBoundaryAdapter(sheriff_fn=blocking_sheriff)
     decision = adapter.pre_tool_call(
         PreToolCallRequest(session_id=generate_uuid_v7(), skill_name="x", tool_name="y")
     )
@@ -81,8 +81,8 @@ def test_pre_tool_adapter_blocks_sheriff_verdicts():
     assert decision.reason == "sheriff_block:POLICY_VIOLATION"
 
 
-def test_v012_pre_approval_request_fails_closed_for_g3_without_budget():
-    adapter = HermesV011PreToolCallAdapter()
+def test_hermes_approval_boundary_pre_approval_request_fails_closed_for_g3_without_budget():
+    adapter = HermesApprovalBoundaryAdapter()
 
     decision = adapter.pre_approval_request(
         ApprovalRequest(
@@ -99,8 +99,8 @@ def test_v012_pre_approval_request_fails_closed_for_g3_without_budget():
     assert decision.check_path[:2] == ("pre_approval_request", "sheriff")
 
 
-def test_v012_post_approval_response_blocks_unapproved_g3_dispatch():
-    adapter = HermesV011PreToolCallAdapter()
+def test_hermes_approval_boundary_post_approval_response_blocks_unapproved_g3_dispatch():
+    adapter = HermesApprovalBoundaryAdapter()
 
     decision = adapter.post_approval_response(
         ApprovalResponse(

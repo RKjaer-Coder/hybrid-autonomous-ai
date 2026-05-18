@@ -38,10 +38,13 @@ from skills.runtime import (
     first_live_project_packet,
     first_live_project_acceptance_check,
     hermes_adapter_gauntlet,
+    model_efficiency_service_packet,
     model_shadow_ops,
     migrate_runtime_databases,
     optimizer_snapshot,
+    pre_live_evidence_crosswalk,
     pre_live_mission_control,
+    pre_live_completion_bundle,
     pre_hermes_readiness,
     prepare_runtime_directories,
     readiness_suite,
@@ -51,6 +54,7 @@ from skills.runtime import (
     self_improvement_evidence_pipeline,
     self_improvement_snapshot,
     target_machine_validation_run_packet,
+    pre_live_bundle_verification,
     target_machine_evidence_check,
     run_flywheel_drill,
     run_research_cron_proof,
@@ -250,7 +254,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert Path(manifest["hermes_adapter_gauntlet_path"]).is_file()
     assert Path(manifest["first_live_project_packet_path"]).is_file()
     assert Path(manifest["model_shadow_ops_path"]).is_file()
+    assert Path(manifest["model_efficiency_service_packet_path"]).is_file()
+    assert Path(manifest["pre_live_completion_bundle_path"]).is_file()
     assert Path(manifest["target_machine_validation_run_packet_path"]).is_file()
+    assert Path(manifest["pre_live_bundle_verification_path"]).is_file()
     assert Path(manifest["target_machine_evidence_check_path"]).is_file()
     assert Path(manifest["first_live_project_acceptance_check_path"]).is_file()
     assert Path(manifest["self_improvement_snapshot_path"]).is_file()
@@ -271,7 +278,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "--hermes-adapter-gauntlet" in workspace_manifest["hermes_adapter_gauntlet_command"]
     assert "--first-live-project-packet" in workspace_manifest["first_live_project_packet_command"]
     assert "--model-shadow-ops" in workspace_manifest["model_shadow_ops_command"]
+    assert "--model-efficiency-service-packet" in workspace_manifest["model_efficiency_service_packet_command"]
+    assert "--pre-live-completion-bundle" in workspace_manifest["pre_live_completion_bundle_command"]
     assert "--target-machine-validation-run-packet" in workspace_manifest["target_machine_validation_run_packet_command"]
+    assert "--pre-live-bundle-verification" in workspace_manifest["pre_live_bundle_verification_command"]
     assert "--target-machine-evidence-check" in workspace_manifest["target_machine_evidence_check_command"]
     assert "--first-live-project-acceptance-check" in workspace_manifest["first_live_project_acceptance_check_command"]
     assert "--self-improvement-evidence-pipeline" in workspace_manifest["self_improvement_evidence_pipeline_command"]
@@ -281,7 +291,10 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
     assert "hermes_adapter_gauntlet" in workspace_manifest["read_only_readiness_surfaces"]
     assert "first_live_project_packet" in workspace_manifest["read_only_readiness_surfaces"]
     assert "model_shadow_ops" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "model_efficiency_service_packet" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "pre_live_completion_bundle" in workspace_manifest["read_only_readiness_surfaces"]
     assert "target_machine_validation_run_packet" in workspace_manifest["read_only_readiness_surfaces"]
+    assert "pre_live_bundle_verification" in workspace_manifest["read_only_readiness_surfaces"]
     assert "target_machine_evidence_check" in workspace_manifest["read_only_readiness_surfaces"]
     assert "first_live_project_acceptance_check" in workspace_manifest["read_only_readiness_surfaces"]
     assert "self_improvement_evidence_pipeline" in workspace_manifest["read_only_readiness_surfaces"]
@@ -317,6 +330,7 @@ def test_install_runtime_profile_writes_manifest_and_launchers(tmp_path):
         "pre_tool_call",
         "pre_approval_request",
         "post_approval_response",
+        "api_run_approval_event",
     ]
     assert profile_config["approvals"]["mode"] == "manual"
     assert spec_profile["profile"] == "hybrid-test"
@@ -431,7 +445,7 @@ def test_exercise_hermes_contract_runs_full_lifecycle_and_logs_trace(tmp_path):
     assert result.approval_review["status"] == "APPROVED"
     assert result.dispatch_result is not None
     assert result.dispatch_result["dispatch_status"] == "DISPATCHED"
-    assert all(result.v012_contract_checks.values())
+    assert all(result.hermes_contract_checks.values())
     assert result.runtime_halt is not None
     assert result.runtime_halt["source"] == "JUDGE_DEADLOCK"
     assert result.blocked_dispatch_pre_side_effect is True
@@ -513,7 +527,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.14.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "default\nhybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -553,7 +567,7 @@ def test_assess_hermes_readiness_passes_with_live_hermes_signals(tmp_path, monke
 
     assert result.ok is True
     assert result.hermes_installed is True
-    assert result.hermes_version == "0.12.0"
+    assert result.hermes_version == "0.14.0"
     assert result.profile_listed is True
     assert all(result.seed_tool_status.values())
     assert all(result.config_status.values())
@@ -644,7 +658,7 @@ def test_assess_hermes_readiness_fails_when_live_config_contract_drifts(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.14.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -701,7 +715,7 @@ def test_assess_hermes_readiness_cli_smoke_checks_step_outcome_and_logs(tmp_path
     def runner(argv):
         key = tuple(argv)
         if key == ("hermes", "--version"):
-            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.12.0", "")
+            return ExternalCommandResult(True, key, 0, "Hermes Agent 0.14.0", "")
         if key == ("hermes", "profile", "list"):
             return ExternalCommandResult(True, key, 0, "hybrid-test\n", "")
         if key == ("hermes", "tools", "list"):
@@ -981,8 +995,8 @@ def test_hermes_adapter_readiness_creates_kernel_packet_and_workspace_surface(tm
     )
 
     assert payload["available"] is True
-    assert payload["packet"]["adapter_name"] == "hermes-v0.13"
-    assert payload["packet"]["hermes_version"] == "0.13.0"
+    assert payload["packet"]["adapter_name"] == "hermes-v0.14"
+    assert payload["packet"]["hermes_version"] == "0.14.0"
     assert payload["packet"]["readiness_status"] == "action_required"
     assert payload["packet"]["recovery_readiness_packet_id"] == payload["recovery_readiness"]["packet_id"]
     assert payload["packet"]["live_controls_enabled"] is False
@@ -1104,7 +1118,7 @@ def test_migration_readiness_creates_kernel_map_and_workspace_surface(tmp_path):
     by_surface = {record["surface_ref"]: record for record in payload["records"]}
     assert by_surface["kernel.db"]["ownership_action"] == "adopt"
     assert by_surface["strategic_memory.db"]["ownership_action"] == "convert-to-projection"
-    assert by_surface["custom_mission_control_dashboard"]["readiness_status"] == "retired"
+    assert not any("mission_control" in surface_ref for surface_ref in by_surface)
     assert by_surface["hermes_adapter_readiness.json"]["readiness_status"] == "action_required"
     assert by_surface["strategic_memory.db"]["next_operator_actions"]
 
@@ -1219,7 +1233,7 @@ def test_readiness_suite_runs_read_only_invariant_checks(tmp_path):
     assert Path(payload["artifact_path"]).is_file()
 
 
-def test_hermes_adapter_gauntlet_covers_v013_surfaces_without_authority(tmp_path):
+def test_hermes_adapter_gauntlet_covers_v014_surfaces_without_authority(tmp_path):
     cfg = IntegrationConfig(
         data_dir=str(tmp_path / "data"),
         skills_dir=str(tmp_path / "skills"),
@@ -1234,25 +1248,101 @@ def test_hermes_adapter_gauntlet_covers_v013_surfaces_without_authority(tmp_path
     )
 
     assert payload["available"] is True
-    assert payload["summary"]["surface_count"] == 10
-    assert payload["summary"]["authority_boundary_case_count"] == 8
+    assert payload["summary"]["surface_count"] == 20
+    assert payload["summary"]["authority_boundary_case_count"] == 13
     assert payload["summary"]["all_surfaces_covered"] is True
     assert payload["live_controls_enabled"] is False
     assert payload["activation_effect"] == "none"
     assert all(item["live_controls_enabled"] is False for item in payload["surface_matrix"])
     proof_results = payload["proof_results"]
-    assert proof_results["summary"]["surface_result_count"] == 10
-    assert proof_results["summary"]["authority_boundary_result_count"] == 8
-    assert proof_results["summary"]["fail_closed_result_count"] == 18
+    assert proof_results["summary"]["surface_result_count"] == 20
+    assert proof_results["summary"]["authority_boundary_result_count"] == 13
+    assert proof_results["summary"]["fail_closed_result_count"] == 33
     assert proof_results["summary"]["missing_stale_or_ambiguous_evidence_blocks_live_authority"] is True
     assert all(item["status"] == "fail_closed_missing_evidence" for item in proof_results["surface_results"])
     assert all(item["fail_closed"] is True for item in proof_results["authority_boundary_results"])
+    assert payload["resume_replay_summary"] == {
+        "case_count": 8,
+        "all_resume_paths_revalidate_kernel_authority": True,
+        "external_side_effects_reexecuted": False,
+        "replay_intents_reconstructed_only": True,
+        "live_controls_enabled": False,
+    }
+    assert all(
+        item["stale_or_failed_check_result"] == "blocked_before_worker_continuation"
+        for item in payload["resume_side_effect_replay_cases"]
+    )
     assert {item["surface"] for item in payload["surface_matrix"]} >= {
         "kanban_worker_lifecycle",
         "goal_checkpoint_gateway_resume",
         "provider_plugins_and_model_profiles",
         "break_glass_halt",
     }
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_model_efficiency_service_packet_is_operator_gated_local_only_offer(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = model_efficiency_service_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:06:30+00:00",
+    )
+
+    assert payload["available"] is True
+    assert payload["summary"]["buyer_profile_count"] == 3
+    assert payload["summary"]["seed_task_class_count"] == 3
+    assert payload["summary"]["route_mutation_enabled"] is False
+    assert payload["summary"]["operator_gate_required_for_customer_delivery"] is True
+    assert payload["summary"]["external_side_effects_allowed"] is False
+    assert payload["kernel_boundaries"]["model_intelligence_supplies_evidence_only"] is True
+    assert "customer_visible_delivery" in payload["blocked_autonomous_actions"]
+    assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_completion_bundle_proves_all_ten_goals_and_stays_closed(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = pre_live_completion_bundle(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-18T00:00:00+00:00",
+    )
+
+    assert payload["status"] == "complete_pre_live_coding"
+    assert payload["summary"]["all_ten_complete"] is True
+    assert payload["summary"]["completed_goals"] == 10
+    assert payload["summary"]["total_goals"] == 10
+    assert payload["blockers"] == []
+    assert {goal["goal_id"] for goal in payload["goals"]} == {
+        "operator_project_loop",
+        "model_efficiency_service",
+        "seed_model_intelligence",
+        "research_retrieval",
+        "council_execution",
+        "hermes_adapter_proxy",
+        "side_effect_delivery",
+        "operator_gate_surface",
+        "data_governance",
+        "evidence_packaging",
+    }
+    assert all(goal["complete"] for goal in payload["goals"])
+    assert payload["closed_control_contract"]["live_controls_enabled"] is False
+    assert payload["closed_control_contract"]["paid_provider_calls_enabled"] is False
+    assert payload["closed_control_contract"]["customer_visible_commitments_enabled"] is False
+    assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
 
 
@@ -1387,18 +1477,109 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
 
     assert payload["available"] is True
     assert payload["status"] == "ready_for_target_machine_execution"
-    assert [step["step"] for step in payload["run_steps"]] == list(range(1, 10))
+    assert [step["step"] for step in payload["run_steps"]] == list(range(1, 11))
     assert payload["component_summary"]["pre_live_mission_control"] == "ready_for_target_machine_validation"
-    assert payload["component_summary"]["adapter_surface_count"] == 10
-    assert payload["component_summary"]["adapter_authority_boundary_case_count"] == 8
+    assert payload["component_summary"]["adapter_surface_count"] == 20
+    assert payload["component_summary"]["adapter_authority_boundary_case_count"] == 13
     assert payload["component_summary"]["first_live_project_phase_count"] == 4
     assert payload["component_summary"]["model_shadow_seed_task_class_count"] == 3
+    assert payload["component_summary"]["model_efficiency_seed_task_class_count"] == 3
+    assert all(payload["execution_order_contract"].values())
+    assert payload["closed_control_contract"] == {
+        "live_controls_enabled": False,
+        "dashboard_writes_enabled": False,
+        "paid_provider_calls_enabled": False,
+        "customer_visible_commitments_enabled": False,
+        "model_route_promotion_enabled": False,
+        "autonomous_patch_application_enabled": False,
+        "side_effect_replay_enabled": False,
+    }
     assert all(item["exists"] for item in payload["evidence_manifest"])
     assert all(item["sha256"] for item in payload["evidence_manifest"])
     assert all(item["required_before_live_authority"] for item in payload["evidence_manifest"])
     assert "target_machine_artifact_bundle" in payload["run_steps"][-1]["required_evidence"]
     assert "paid_provider_calls" in payload["fail_closed_controls"]
     assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_evidence_crosswalk_maps_s10_requirements_to_repo_proofs(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+
+    payload = pre_live_evidence_crosswalk(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+
+    assert payload["status"] == "mapped_pre_live_handoff_evidence"
+    assert payload["source_spec"] == "spec/s10_pre_live_handoff.md"
+    assert payload["summary"]["checklist_item_count"] == 11
+    assert payload["summary"]["ready_item_count"] == 11
+    assert payload["summary"]["all_items_ready"] is True
+    assert payload["summary"]["closed_control_contract_ok"] is True
+    assert payload["blockers"] == []
+    assert all(row["ready"] for row in payload["checklist_rows"])
+    assert all(row["required_evidence"] for row in payload["checklist_rows"])
+    assert all(not row["opened_controls"] for row in payload["checklist_rows"])
+    assert all(
+        artifact["exists"] and artifact["sha256"] and artifact["required_before_live_authority"]
+        for row in payload["checklist_rows"]
+        for artifact in row["artifact_checks"]
+    )
+    assert payload["live_controls_enabled"] is False
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_pre_live_bundle_verification_checks_required_packets_and_checksums(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "pre-live-bundle"
+    bundle.mkdir()
+    copied = []
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        target = bundle / source.name
+        target.write_bytes(source.read_bytes())
+        copied.append(target)
+    run_packet_path = Path(run_packet["artifact_path"])
+    target = bundle / run_packet_path.name
+    target.write_bytes(run_packet_path.read_bytes())
+    copied.append(target)
+    (bundle / "SHA256SUMS").write_text(
+        "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(copied)),
+        encoding="utf-8",
+    )
+
+    payload = pre_live_bundle_verification(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:08:30+00:00",
+    )
+
+    assert payload["status"] == "verified_pre_live_bundle"
+    assert payload["blockers"] == []
+    assert payload["summary"]["required_files_present"] == payload["summary"]["required_file_count"]
+    assert payload["summary"]["required_json_non_empty"] is True
+    assert payload["summary"]["required_checksums_match"] is True
+    assert payload["summary"]["live_controls_disabled"] is True
+    assert payload["summary"]["target_machine_status"] == "ready_for_target_machine_execution"
     assert Path(payload["artifact_path"]).is_file()
 
 
@@ -2312,7 +2493,7 @@ def test_runtime_main_hermes_adapter_readiness_prints_json_without_live_controls
     output = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert output["packet"]["adapter_name"] == "hermes-v0.13"
+    assert output["packet"]["adapter_name"] == "hermes-v0.14"
     assert output["packet"]["live_controls_enabled"] is False
     assert output["live_controls_enabled"] is False
     assert output["comparison"]["matches"] is True

@@ -103,10 +103,11 @@ EXPECTED_DASHBOARD_SURFACES = (
     "Agent Profiles",
     "Analytics",
 )
-EXPECTED_V012_HOOKS = (
+EXPECTED_APPROVAL_BOUNDARY_EVENTS = (
     "pre_tool_call",
     "pre_approval_request",
     "post_approval_response",
+    "api_run_approval_event",
 )
 EXPECTED_PINNED_SKILLS = (
     "immune_system",
@@ -114,12 +115,11 @@ EXPECTED_PINNED_SKILLS = (
     "operator_interface",
 )
 LEGACY_SPLIT_DATABASES = ("opportunity.db", "project.db", "treasury.db")
-MANIFEST_HERMES_VERSION_FLOOR = (0, 12, 0)
-CHECKLIST_HERMES_VERSION_FLOOR = (0, 12, 0)
+MANIFEST_HERMES_VERSION_FLOOR = (0, 14, 0)
+CHECKLIST_HERMES_VERSION_FLOOR = (0, 14, 0)
 VERSION_DRIFT_NOTE = (
-    "spec drift: repo runtime now targets Hermes v0.12.0+ and treats "
-    "config.yaml as the primary upstream surface. Any remaining v0.8/v0.9/v0.11 "
-    "language should be considered stale."
+    "repo runtime targets Hermes v0.14.0+ and treats config.yaml plus "
+    "kernel-owned readiness packets as the primary integration surfaces."
 )
 PROFILE_DRIFT_NOTE = (
     "spec/doc drift: upstream Hermes docs center config.yaml inside the profile "
@@ -506,6 +506,10 @@ from kernel.runtime_paths import (
     _runtime_first_live_project_packet_path,
     _runtime_first_live_project_acceptance_check_path,
     _runtime_model_shadow_ops_path,
+    _runtime_model_efficiency_service_packet_path,
+    _runtime_pre_live_completion_bundle_path,
+    _runtime_pre_live_evidence_crosswalk_path,
+    _runtime_pre_live_bundle_verification_path,
     _runtime_target_machine_evidence_check_path,
     _runtime_target_machine_validation_run_packet_path,
     _runtime_profile_config_path,
@@ -1033,6 +1037,34 @@ def _repo_local_hermes_adapter_proof_inputs(
             "evidence_refs": [artifact_refs["local_provider_doctor"], artifact_refs["profile_config"]],
         },
         {
+            "surface": "hermes_openai_compatible_proxy",
+            "status": status("start_proxy" in commands and repo_contract["zero_spend_profile"]),
+            "proof": "Hermes proxy is treated as transport; paid/OAuth provider authority remains kernel-brokered.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"], artifact_refs["profile_config"]],
+        },
+        {
+            "surface": "live_session_handoff",
+            "status": status("contract_harness" in commands and Path(config.checkpoints_dir).is_dir()),
+            "proof": "Live handoff is governed by the same checkpoint/resume reconciliation contract.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"]],
+        },
+        {
+            "surface": "api_approval_event_stream",
+            "status": status(repo_contract["zero_spend_profile"]),
+            "proof": "API approval events may prompt an operator, but kernel gate records remain authoritative.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_config"]],
+        },
+        {
+            "surface": "prompt_cache_route_revalidation",
+            "status": status(repo_contract["zero_spend_profile"]),
+            "proof": "Cached prompts cannot reuse spend, route, or data-class authority without revalidation.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_config"]],
+        },
+        {
             "surface": "mcp_sse_oauth_forwarding",
             "status": status(bool(gateway_doc.get("startup_hint")) and repo_contract["repo_root_available"]),
             "proof": "Gateway forwarding is represented as manifest-only startup guidance.",
@@ -1043,6 +1075,13 @@ def _repo_local_hermes_adapter_proof_inputs(
             "surface": "no_agent_cron_watchdog",
             "status": status("research_cron_proof" in commands and "task_loop_proof" in commands),
             "proof": "Cron/watchdog readiness is limited to deterministic repo-local proof commands.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"]],
+        },
+        {
+            "surface": "watchers_change_detection",
+            "status": status("research_cron_proof" in commands),
+            "proof": "Hermes watchers are allowed only as deterministic inspection or alert producers.",
             "live_control_enabled": False,
             "evidence_refs": [artifact_refs["profile_manifest"]],
         },
@@ -1059,6 +1098,41 @@ def _repo_local_hermes_adapter_proof_inputs(
             "proof": "Network allowlists and redaction boundaries are repo-owned artifacts.",
             "live_control_enabled": False,
             "evidence_refs": [artifact_refs["network_controls"], artifact_refs["proxy_allowlist"]],
+        },
+        {
+            "surface": "teams_graph_gateway_pipeline",
+            "status": status(bool(gateway_doc.get("startup_hint"))),
+            "proof": "Teams/Graph is notification transport until side-effect intents and receipts exist.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["gateway_manifest"]],
+        },
+        {
+            "surface": "x_search_external_source",
+            "status": status(bool(network_doc.get("outbound_allowlist"))),
+            "proof": "X search is a research source surface governed by source policy and evidence gates.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["network_controls"]],
+        },
+        {
+            "surface": "computer_use_backend",
+            "status": status(repo_contract["repo_root_available"]),
+            "proof": "Computer-use remains blocked for autonomous work without scoped grants and halt checks.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_config"]],
+        },
+        {
+            "surface": "lsp_write_diagnostics",
+            "status": status(repo_contract["repo_root_available"]),
+            "proof": "Write-time diagnostics are advisory evidence, not acceptance or promotion authority.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_manifest"]],
+        },
+        {
+            "surface": "plugin_llm_tool_override",
+            "status": status(repo_contract["zero_spend_profile"] and repo_contract["provider_deferred"]),
+            "proof": "Plugin LLM and tool override paths cannot bypass kernel capability/model-route checks.",
+            "live_control_enabled": False,
+            "evidence_refs": [artifact_refs["profile_config"]],
         },
     ]
 
@@ -1239,8 +1313,8 @@ def hermes_adapter_readiness(
     config: IntegrationConfig | None = None,
     *,
     repo_root: str | None = None,
-    adapter_name: str = "hermes-v0.13",
-    hermes_version: str = "0.13.0",
+    adapter_name: str = "hermes-v0.14",
+    hermes_version: str = "0.14.0",
     as_of: str | None = None,
     surface_checks: list[dict[str, Any]] | None = None,
     reconciliation_checks: list[dict[str, Any]] | None = None,
@@ -1592,20 +1666,9 @@ def _migration_record_payloads(config: IntegrationConfig, repo_root: Path, as_of
             "owner_domain": "deployment_adapter",
             "summary": "Hermes adapter readiness is exposed as read-only proof state, not live Hermes activation.",
             "blockers": [live_hermes_blocker],
-            "evidence_refs": [f"file:{_runtime_hermes_adapter_readiness_path(config)}", "spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs"],
-            "next_operator_actions": [action("run_live_adapter_proof_on_target_machine", "Attach live Hermes only after target-machine adapter checks pass.", ["spec:s08_operator_deployment#Hermes v0.13 Adapter Proofs"])],
+            "evidence_refs": [f"file:{_runtime_hermes_adapter_readiness_path(config)}", "spec:s08_operator_deployment#Hermes Adapter Proofs"],
+            "next_operator_actions": [action("run_live_adapter_proof_on_target_machine", "Attach live Hermes only after target-machine adapter checks pass.", ["spec:s08_operator_deployment#Hermes Adapter Proofs"])],
             "readiness_status": "action_required",
-        },
-        {
-            "surface_ref": "custom_mission_control_dashboard",
-            "component_type": "artifact",
-            "ownership_action": "retire",
-            "owner_domain": "operator_surface",
-            "summary": "Repo-maintained Mission Control dashboard is retired; Hermes-native dashboard remains read-only until adapter authority is proven.",
-            "blockers": [],
-            "evidence_refs": ["file:README.md", spec_deployment_ref],
-            "next_operator_actions": [],
-            "readiness_status": "retired",
         },
     ]
 
@@ -1988,6 +2051,13 @@ def _write_target_machine_validation_run_packet_artifact(config: IntegrationConf
     _write_json_yaml(_runtime_target_machine_validation_run_packet_path(config), artifact)
 
 
+def _write_pre_live_bundle_verification_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_pre_live_bundle_verification_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_pre_live_bundle_verification_path(config), artifact)
+
+
 def _write_target_machine_evidence_check_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
     artifact = dict(payload)
     artifact.setdefault("artifact_path", str(_runtime_target_machine_evidence_check_path(config)))
@@ -2000,6 +2070,27 @@ def _write_first_live_project_acceptance_check_artifact(config: IntegrationConfi
     artifact.setdefault("artifact_path", str(_runtime_first_live_project_acceptance_check_path(config)))
     artifact.setdefault("live_controls_enabled", False)
     _write_json_yaml(_runtime_first_live_project_acceptance_check_path(config), artifact)
+
+
+def _write_model_efficiency_service_packet_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_model_efficiency_service_packet_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_model_efficiency_service_packet_path(config), artifact)
+
+
+def _write_pre_live_completion_bundle_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_pre_live_completion_bundle_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_pre_live_completion_bundle_path(config), artifact)
+
+
+def _write_pre_live_evidence_crosswalk_artifact(config: IntegrationConfig, payload: dict[str, Any]) -> None:
+    artifact = dict(payload)
+    artifact.setdefault("artifact_path", str(_runtime_pre_live_evidence_crosswalk_path(config)))
+    artifact.setdefault("live_controls_enabled", False)
+    _write_json_yaml(_runtime_pre_live_evidence_crosswalk_path(config), artifact)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -2186,13 +2277,14 @@ def hermes_adapter_gauntlet(
     repo_root: str | None = None,
     as_of: str | None = None,
 ) -> dict[str, Any]:
-    """Create the repo-local v0.13 adapter certification matrix."""
+    """Create the repo-local Hermes adapter certification matrix."""
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     install_runtime_profile(resolved, repo_root=str(root))
     test_set = generate_first_live_project_test_set()
     harness = test_set["hermes_adapter_validation_harness"]
     boundary = test_set["authority_boundary_gauntlet"]
+    resume_fixture = test_set["resume_side_effect_replay_fixture"]
     readiness = hermes_adapter_readiness(resolved, repo_root=str(root), as_of=as_of)
     matrix = []
     for check in harness["checks"]:
@@ -2230,13 +2322,28 @@ def hermes_adapter_gauntlet(
         "summary": {
             "surface_count": len(matrix),
             "authority_boundary_case_count": len(adversarial),
-            "all_surfaces_covered": len(matrix) == 10,
+            "all_surfaces_covered": len(matrix) == len(harness["checks"]),
             "live_controls_enabled": False,
             "readiness_status": _component_status(readiness),
         },
         "surface_matrix": matrix,
         "authority_boundary_cases": adversarial,
+        "resume_side_effect_replay_cases": resume_fixture["cases"],
         "proof_results": _adapter_proof_results(matrix, adversarial),
+        "resume_replay_summary": {
+            "case_count": len(resume_fixture["cases"]),
+            "all_resume_paths_revalidate_kernel_authority": all(
+                len(item["required_reconciliation"]) >= 7 for item in resume_fixture["cases"]
+            ),
+            "external_side_effects_reexecuted": any(
+                item["external_side_effects_reexecuted"] for item in resume_fixture["cases"]
+            ),
+            "replay_intents_reconstructed_only": all(
+                item["side_effect_replay_result"] == "reconstruct_intent_and_receipt_only"
+                for item in resume_fixture["cases"]
+            ),
+            "live_controls_enabled": False,
+        },
         "readiness_packet": readiness.get("packet"),
         "readiness_artifact_path": readiness.get("artifact_path"),
         "pass_rule": harness["pass_rule"],
@@ -2412,6 +2519,276 @@ def model_shadow_ops(
     return payload
 
 
+def model_efficiency_service_packet(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Create the local-only commercial packet for the governed model-efficiency service."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    prepare_runtime_directories(resolved)
+    test_set = generate_first_live_project_test_set()
+    packet = test_set["model_efficiency_service_packet"]
+    seed_task_classes = packet["seed_task_classes"]
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "model_efficiency_service_packet",
+        **packet,
+        "summary": {
+            "buyer_profile_count": len(packet["offer"]["buyer_profiles"]),
+            "seed_task_class_count": len(seed_task_classes),
+            "route_mutation_enabled": packet["savings_report"]["route_mutation_enabled"],
+            "operator_gate_required_for_customer_delivery": (
+                packet["offer"]["customer_visible_delivery"] == "operator_gate_required"
+            ),
+            "external_side_effects_allowed": packet["offer"]["external_side_effects_allowed"],
+            "kill_criteria_count": len(packet["kill_criteria"]),
+        },
+        "blocked_autonomous_actions": [
+            "customer_visible_delivery",
+            "model_route_promotion",
+            "paid_provider_call_without_budget_grant",
+            "eval_holdout_mutation",
+            "revenue_claim_without_recorded_receipt",
+        ],
+        "artifact_path": str(_runtime_model_efficiency_service_packet_path(resolved)),
+        "live_controls_enabled": False,
+        "activation_effect": "operator_decision_packet_only",
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_model_efficiency_service_packet_artifact(resolved, payload)
+    return payload
+
+
+def pre_live_completion_bundle(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    candidate_limit: int = 3,
+) -> dict[str, Any]:
+    """Create the all-ten pre-live completion proof bundle.
+
+    This is the repo-owned answer to "are the ten pre-live coding areas done?"
+    It combines the deterministic runtime packets with concrete implementation
+    surfaces and fails closed if any goal lacks code, tests, or closed-control
+    evidence. It does not enable Hermes, customer delivery, paid calls, route
+    promotion, or dashboard writes.
+    """
+
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    timestamp = as_of or _utc_now()
+    target_run = target_machine_validation_run_packet(
+        resolved,
+        repo_root=str(root),
+        as_of=timestamp,
+        candidate_limit=candidate_limit,
+    )
+    mission = _read_json_yaml(_runtime_pre_live_mission_control_path(resolved)) or {}
+    if not mission:
+        mission = pre_live_mission_control(
+            resolved,
+            repo_root=str(root),
+            as_of=timestamp,
+            candidate_limit=candidate_limit,
+        )
+    first_project = mission["components"]["first_live_project"]
+    adapter = mission["components"]["hermes_adapter_gauntlet"]
+    shadow = mission["components"]["model_shadow_ops"]
+    efficiency = model_efficiency_service_packet(resolved, repo_root=str(root), as_of=timestamp)
+    readiness = mission["components"]["readiness_suite"]
+
+    source_files = {
+        "kernel_pre_live": root / "kernel" / "pre_live.py",
+        "kernel_research": root / "kernel" / "research.py",
+        "kernel_commercial": root / "kernel" / "commercial.py",
+        "kernel_model_intelligence": root / "kernel" / "model_intelligence.py",
+        "kernel_runtime": root / "kernel" / "runtime.py",
+        "kernel_runtime_compat": root / "kernel" / "runtime_compat.py",
+        "kernel_store_artifacts": root / "kernel" / "store_artifacts.py",
+        "kernel_store_recovery": root / "kernel" / "store_recovery.py",
+        "kernel_store_migration": root / "kernel" / "store_migration.py",
+        "foundation_tests": root / "tests" / "test_kernel_foundation.py",
+        "research_tests": root / "tests" / "test_kernel_research.py",
+        "model_tests": root / "tests" / "test_kernel_model_intelligence.py",
+        "runtime_tests": root / "tests" / "test_skills" / "test_runtime.py",
+        "pre_live_tests": root / "tests" / "test_kernel_pre_live.py",
+    }
+    source_status = {name: path.is_file() for name, path in source_files.items()}
+    component_paths = {
+        "pre_live_mission_control": _runtime_pre_live_mission_control_path(resolved),
+        "hermes_adapter_gauntlet": _runtime_hermes_adapter_gauntlet_path(resolved),
+        "first_live_project_packet": _runtime_first_live_project_packet_path(resolved),
+        "model_shadow_ops": _runtime_model_shadow_ops_path(resolved),
+        "model_efficiency_service_packet": _runtime_model_efficiency_service_packet_path(resolved),
+        "target_machine_validation_run_packet": _runtime_target_machine_validation_run_packet_path(resolved),
+    }
+    component_artifacts = {
+        name: {"path": str(path), "exists": path.is_file(), "sha256": _file_sha256(path)}
+        for name, path in component_paths.items()
+    }
+
+    workflow = first_project["workflow"]
+    workflow_has_events_and_grants = all(
+        step.get("event_before_projection") and step.get("capability_grants_required")
+        for step in workflow
+    )
+    mission_ready = mission.get("go_no_go") == "ready_for_target_machine_validation"
+    target_ready = target_run.get("status") == "ready_for_target_machine_execution"
+    closed_controls = target_run.get("closed_control_contract", {})
+    closed_control_ok = closed_controls and not any(bool(value) for value in closed_controls.values())
+
+    goals = [
+        _pre_live_goal(
+            "operator_project_loop",
+            "End-to-end operator validate/build/ship/feedback loop",
+            source_status["kernel_commercial"] and source_status["research_tests"],
+            first_project["summary"]["ready_for_target_machine_fixture"]
+            and first_project["summary"]["phase_count"] == 4
+            and first_project["summary"]["local_artifact_only"]
+            and not first_project["summary"]["external_commitments_allowed"],
+            ["kernel/commercial.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "model_efficiency_service",
+            "Governed model-efficiency service packet and shadow evidence",
+            source_status["kernel_model_intelligence"] and source_status["runtime_tests"],
+            efficiency["summary"]["seed_task_class_count"] == 3
+            and efficiency["summary"]["operator_gate_required_for_customer_delivery"]
+            and not efficiency["summary"]["route_mutation_enabled"]
+            and not efficiency["summary"]["external_side_effects_allowed"],
+            ["kernel/model_intelligence.py", "model_efficiency_service_packet.json"],
+        ),
+        _pre_live_goal(
+            "seed_model_intelligence",
+            "Seed Model Intelligence registry, eval, route, and promotion gates",
+            source_status["kernel_model_intelligence"] and source_status["model_tests"],
+            shadow["summary"]["seed_task_class_count"] == 3
+            and shadow["summary"]["shadow_mode_only"]
+            and shadow["summary"]["operator_gate_required_for_promotion"]
+            and not shadow["summary"]["live_route_mutation_enabled"],
+            ["kernel/model_intelligence.py", "tests/test_kernel_model_intelligence.py", "model_shadow_ops.json"],
+        ),
+        _pre_live_goal(
+            "research_retrieval",
+            "Research Engine retrieval planning, grants, acquisition, and evidence bundles",
+            source_status["kernel_research"] and source_status["research_tests"],
+            workflow_has_events_and_grants
+            and "research_findings" in first_project["artifact_contract"]["sections"],
+            ["kernel/research.py", "tests/test_kernel_research.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "council_execution",
+            "Council/scarce-deliberation records for high-uncertainty decisions",
+            source_status["kernel_commercial"] and source_status["research_tests"],
+            adapter["summary"]["authority_boundary_case_count"] >= 8
+            and "customer_visible_commitments" in target_run["fail_closed_controls"],
+            ["kernel/commercial.py", "tests/test_kernel_research.py", "hermes_adapter_gauntlet.json"],
+        ),
+        _pre_live_goal(
+            "hermes_adapter_proxy",
+            "Hermes adapter, migration, and proxy enforcement readiness",
+            source_status["kernel_runtime"] and source_status["kernel_runtime_compat"],
+            adapter["summary"]["all_surfaces_covered"]
+            and adapter["summary"]["surface_count"] >= 10
+            and readiness.get("ok")
+            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"],
+            ["kernel/runtime.py", "kernel/runtime_compat.py", "hermes_adapter_gauntlet.json"],
+        ),
+        _pre_live_goal(
+            "side_effect_delivery",
+            "Side-effect and customer-visible delivery governance",
+            source_status["kernel_commercial"] and source_status["foundation_tests"],
+            first_project["artifact_contract"]["external_delivery"] == "prepared_intent_only_until_operator_gate"
+            and "side_effect_replay" in target_run["fail_closed_controls"]
+            and not closed_controls.get("side_effect_replay_enabled", True),
+            ["kernel/commercial.py", "tests/test_kernel_foundation.py", "first_live_project_packet.json"],
+        ),
+        _pre_live_goal(
+            "operator_gate_surface",
+            "Local operator command and gate surface",
+            source_status["kernel_runtime_compat"] and source_status["runtime_tests"],
+            mission_ready
+            and closed_control_ok
+            and "operator_gate_before_external_delivery" in target_run["run_steps"][6]["required_evidence"],
+            ["kernel/runtime_compat.py", "tests/test_skills/test_runtime.py", "pre_live_mission_control.json"],
+        ),
+        _pre_live_goal(
+            "data_governance",
+            "Artifact, redaction, encrypted storage, backup, and recovery proof",
+            source_status["kernel_store_artifacts"] and source_status["kernel_store_recovery"],
+            readiness.get("ok")
+            and target_run["execution_order_contract"]["recovery_and_migration_before_adapter"]
+            and "artifact_descriptor_verified" in target_run["run_steps"][2]["required_evidence"],
+            ["kernel/store_artifacts.py", "kernel/store_recovery.py", "target_machine_validation_run_packet.json"],
+        ),
+        _pre_live_goal(
+            "evidence_packaging",
+            "Replay/projection comparisons and pre-live evidence packaging",
+            source_status["kernel_pre_live"] and source_status["pre_live_tests"],
+            target_ready
+            and all(item["exists"] and item["sha256"] for item in component_artifacts.values())
+            and "target_machine_artifact_bundle" in target_run["run_steps"][-1]["required_evidence"],
+            ["kernel/pre_live.py", "tests/test_kernel_pre_live.py", "target_machine_validation_run_packet.json"],
+        ),
+    ]
+    blockers = [
+        f"{goal['goal_id']}:{blocker}"
+        for goal in goals
+        for blocker in goal["blockers"]
+    ]
+    payload = {
+        "available": True,
+        "generated_at": timestamp,
+        "packet_name": "pre_live_completion_bundle",
+        "status": "complete_pre_live_coding" if not blockers else "blocked",
+        "repo_root": str(root),
+        "summary": {
+            "completed_goals": sum(1 for goal in goals if goal["complete"]),
+            "total_goals": len(goals),
+            "all_ten_complete": not blockers,
+            "mission_go_no_go": mission.get("go_no_go"),
+            "target_machine_run_status": target_run.get("status"),
+            "live_controls_enabled": False,
+        },
+        "goals": goals,
+        "source_status": source_status,
+        "component_artifacts": component_artifacts,
+        "closed_control_contract": closed_controls,
+        "blockers": blockers,
+        "activation_effect": "none_until_target_machine_evidence_and_operator_gates_pass",
+        "live_controls_enabled": False,
+        "artifact_path": str(_runtime_pre_live_completion_bundle_path(resolved)),
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_pre_live_completion_bundle_artifact(resolved, payload)
+    return payload
+
+
+def _pre_live_goal(
+    goal_id: str,
+    title: str,
+    implementation_present: bool,
+    proof_present: bool,
+    evidence_refs: list[str],
+) -> dict[str, Any]:
+    blockers = []
+    if not implementation_present:
+        blockers.append("implementation_surface_missing")
+    if not proof_present:
+        blockers.append("proof_surface_missing_or_open_control")
+    return {
+        "goal_id": goal_id,
+        "title": title,
+        "complete": not blockers,
+        "blockers": blockers,
+        "evidence_refs": evidence_refs,
+    }
+
+
 def target_machine_validation_run_packet(
     config: IntegrationConfig | None = None,
     *,
@@ -2434,11 +2811,13 @@ def target_machine_validation_run_packet(
     shadow = mission["components"]["model_shadow_ops"]
     readiness = mission["components"]["readiness_suite"]
     patch_gate = mission["components"]["known_bad_manual_patch_gate"]
+    efficiency = model_efficiency_service_packet(resolved, repo_root=str(root), as_of=timestamp)
     generated_artifacts = [
         ("pre_live_mission_control", _runtime_pre_live_mission_control_path(resolved), mission.get("packet_hash")),
         ("hermes_adapter_gauntlet", _runtime_hermes_adapter_gauntlet_path(resolved), adapter.get("packet_hash")),
         ("first_live_project_packet", _runtime_first_live_project_packet_path(resolved), project.get("packet_hash")),
         ("model_shadow_ops", _runtime_model_shadow_ops_path(resolved), shadow.get("packet_hash")),
+        ("model_efficiency_service_packet", _runtime_model_efficiency_service_packet_path(resolved), efficiency.get("packet_hash")),
     ]
     evidence_manifest = []
     for name, path, packet_hash in generated_artifacts:
@@ -2516,9 +2895,16 @@ def target_machine_validation_run_packet(
         },
         {
             "step": 9,
+            "name": "model_efficiency_service_packet",
+            "command": _command_string(resolved, "--model-efficiency-service-packet", str(root)),
+            "required_evidence": ["buyer_profile", "three_seed_task_classes", "savings_report_shape", "kill_criteria"],
+            "fail_closed_on_missing_evidence": True,
+        },
+        {
+            "step": 10,
             "name": "preserve_target_machine_outputs",
             "command": "copy generated JSON outputs and run shasum -a 256 > SHA256SUMS",
-            "required_evidence": ["target_machine_artifact_bundle", "sha256sums"],
+            "required_evidence": ["target_machine_artifact_bundle", "sha256sums", "pre_live_bundle_verification"],
             "fail_closed_on_missing_evidence": True,
         },
     ]
@@ -2533,8 +2919,32 @@ def target_machine_validation_run_packet(
         blockers.append("model_shadow_ops_allows_live_route_mutation")
     if project["summary"].get("external_commitments_allowed"):
         blockers.append("first_live_project_allows_external_commitments")
+    if efficiency["summary"].get("route_mutation_enabled") or efficiency["summary"].get("external_side_effects_allowed"):
+        blockers.append("model_efficiency_packet_allows_live_mutation_or_side_effects")
     if any(not item["exists"] or item["sha256"] is None for item in evidence_manifest):
         blockers.append("missing_generated_evidence_artifact")
+    execution_order_contract = {
+        "metadata_before_artifact_use": run_steps[0]["name"] == "repo_metadata_snapshot",
+        "checksums_before_readiness": run_steps[1]["name"] == "handoff_checksum_verification",
+        "recovery_and_migration_before_adapter": (
+            run_steps[2]["name"] == "recovery_and_migration_readiness"
+            and run_steps[3]["name"] == "hermes_adapter_gauntlet"
+        ),
+        "adapter_before_mission_control": (
+            run_steps[3]["name"] == "hermes_adapter_gauntlet"
+            and run_steps[4]["name"] == "pre_live_mission_control"
+        ),
+        "model_shadow_before_first_project": (
+            run_steps[5]["name"] == "model_shadow_ops"
+            and run_steps[6]["name"] == "first_live_project_packet"
+        ),
+        "known_bad_manual_only_before_preserve": (
+            run_steps[7]["name"] == "known_bad_manual_patch_gate_review"
+            and run_steps[-1]["name"] == "preserve_target_machine_outputs"
+        ),
+    }
+    if not all(execution_order_contract.values()):
+        blockers.append("target_machine_execution_order_invalid")
     packet = {
         "available": True,
         "generated_at": timestamp,
@@ -2550,7 +2960,18 @@ def target_machine_validation_run_packet(
             "adapter_authority_boundary_case_count": adapter["summary"]["authority_boundary_case_count"],
             "first_live_project_phase_count": project["summary"]["phase_count"],
             "model_shadow_seed_task_class_count": shadow["summary"]["seed_task_class_count"],
+            "model_efficiency_seed_task_class_count": efficiency["summary"]["seed_task_class_count"],
             "known_bad_manual_patch_gate_available": bool(patch_gate.get("available")),
+        },
+        "execution_order_contract": execution_order_contract,
+        "closed_control_contract": {
+            "live_controls_enabled": False,
+            "dashboard_writes_enabled": False,
+            "paid_provider_calls_enabled": False,
+            "customer_visible_commitments_enabled": False,
+            "model_route_promotion_enabled": False,
+            "autonomous_patch_application_enabled": False,
+            "side_effect_replay_enabled": False,
         },
         "blockers": blockers,
         "fail_closed_controls": [
@@ -2577,6 +2998,227 @@ def target_machine_validation_run_packet(
     packet["packet_hash"] = _stable_json_hash({k: v for k, v in packet.items() if k != "packet_hash"})
     _write_target_machine_validation_run_packet_artifact(resolved, packet)
     return packet
+
+
+def pre_live_evidence_crosswalk(
+    config: IntegrationConfig | None = None,
+    *,
+    repo_root: str | None = None,
+    as_of: str | None = None,
+    candidate_limit: int = 3,
+) -> dict[str, Any]:
+    """Map day-one handoff requirements to repo-owned proof surfaces."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
+    timestamp = as_of or _utc_now()
+    run_packet = target_machine_validation_run_packet(
+        resolved,
+        repo_root=str(root),
+        as_of=timestamp,
+        candidate_limit=candidate_limit,
+    )
+    artifacts_by_name = {
+        str(item.get("name")): item
+        for item in run_packet.get("evidence_manifest", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    run_packet_artifact = {
+        "name": "target_machine_validation_run_packet",
+        "path": run_packet.get("artifact_path"),
+        "exists": bool(run_packet.get("artifact_path") and Path(str(run_packet["artifact_path"])).is_file()),
+        "sha256": _file_sha256(Path(str(run_packet["artifact_path"]))) if run_packet.get("artifact_path") else None,
+        "required_before_live_authority": True,
+    }
+    artifacts_by_name[run_packet_artifact["name"]] = run_packet_artifact
+    steps_by_name = {
+        str(step.get("name")): step
+        for step in run_packet.get("run_steps", [])
+        if isinstance(step, dict) and step.get("name")
+    }
+    closed_controls = run_packet.get("closed_control_contract", {})
+    closed_control_ok = bool(closed_controls) and not any(bool(value) for value in closed_controls.values())
+
+    def row(
+        checklist_id: str,
+        requirement: str,
+        step_names: list[str],
+        artifact_names: list[str],
+        closed_control_keys: list[str],
+        blocker_conditions: list[str],
+    ) -> dict[str, Any]:
+        mapped_steps = [steps_by_name[name] for name in step_names if name in steps_by_name]
+        mapped_artifacts = [artifacts_by_name[name] for name in artifact_names if name in artifacts_by_name]
+        missing_steps = [name for name in step_names if name not in steps_by_name]
+        missing_artifacts = [name for name in artifact_names if name not in artifacts_by_name]
+        artifact_checks = [
+            {
+                "name": item["name"],
+                "path": item.get("path"),
+                "exists": bool(item.get("exists")),
+                "sha256": item.get("sha256"),
+                "required_before_live_authority": bool(item.get("required_before_live_authority")),
+            }
+            for item in mapped_artifacts
+        ]
+        failing_artifacts = [
+            item["name"]
+            for item in artifact_checks
+            if not item["exists"] or not item["sha256"] or not item["required_before_live_authority"]
+        ]
+        opened_controls = [key for key in closed_control_keys if closed_controls.get(key) is not False]
+        required_evidence = sorted(
+            {
+                str(evidence_id)
+                for step in mapped_steps
+                for evidence_id in step.get("required_evidence", [])
+            }
+        )
+        ready = not missing_steps and not missing_artifacts and not failing_artifacts and not opened_controls
+        return {
+            "checklist_id": checklist_id,
+            "requirement": requirement,
+            "step_names": step_names,
+            "artifact_names": artifact_names,
+            "mapped_step_count": len(mapped_steps),
+            "mapped_artifact_count": len(mapped_artifacts),
+            "required_evidence": required_evidence,
+            "artifact_checks": artifact_checks,
+            "closed_control_keys": closed_control_keys,
+            "missing_steps": missing_steps,
+            "missing_artifacts": missing_artifacts,
+            "failing_artifacts": failing_artifacts,
+            "opened_controls": opened_controls,
+            "blocker_conditions": blocker_conditions,
+            "ready": ready,
+        }
+
+    rows = [
+        row(
+            "s10-01",
+            "Kanban worker lifecycle remains a kernel task projection.",
+            ["repo_metadata_snapshot", "hermes_adapter_gauntlet"],
+            ["hermes_adapter_gauntlet"],
+            ["dashboard_writes_enabled", "live_controls_enabled"],
+            ["adapter_surface_coverage_incomplete", "closed_control_contract_opened_live_control"],
+        ),
+        row(
+            "s10-02",
+            "Goal, checkpoint, gateway resume, ACP steer, and ACP queue revalidate kernel authority before continuation.",
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["live_controls_enabled", "paid_provider_calls_enabled", "side_effect_replay_enabled"],
+            ["required_evidence_missing", "run_packet_live_controls_not_disabled"],
+        ),
+        row(
+            "s10-03",
+            "Handoff, prompt caching, and cached provider prefixes revalidate authority, data class, budget, and halt state.",
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["paid_provider_calls_enabled", "customer_visible_commitments_enabled"],
+            ["required_evidence_stale_or_ambiguous", "closed_control_contract_opened_live_control"],
+        ),
+        row(
+            "s10-04",
+            "Cron and watchers stay deterministic and write findings as kernel inspection or alert records.",
+            ["recovery_and_migration_readiness", "pre_live_mission_control"],
+            ["pre_live_mission_control"],
+            ["live_controls_enabled"],
+            ["readiness_suite_not_ok", "required_evidence_missing"],
+        ),
+        row(
+            "s10-05",
+            "Provider plugins, profiles, ctx.llm, overrides, and proxy routes cannot bypass kernel grants or budgets.",
+            ["hermes_adapter_gauntlet", "model_efficiency_service_packet"],
+            ["hermes_adapter_gauntlet", "model_efficiency_service_packet"],
+            ["paid_provider_calls_enabled", "model_route_promotion_enabled"],
+            ["model_efficiency_packet_allows_live_mutation_or_side_effects", "required_evidence_missing"],
+        ),
+        row(
+            "s10-06",
+            "MCP SSE and OAuth forwarding preserve scopes, timeouts, media handling, failure records, and broker boundaries.",
+            ["hermes_adapter_gauntlet"],
+            ["hermes_adapter_gauntlet"],
+            ["paid_provider_calls_enabled", "side_effect_replay_enabled"],
+            ["adapter_surface_coverage_incomplete", "required_evidence_stale_or_ambiguous"],
+        ),
+        row(
+            "s10-07",
+            "Dashboard controls stay read-only or projection-only until auth, timeout, replay, and audit match kernel gates.",
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["dashboard_writes_enabled", "live_controls_enabled"],
+            ["closed_control_contract_opened_live_control", "required_pre_live_artifact_live_controls_not_disabled"],
+        ),
+        row(
+            "s10-08",
+            "Platform allowlists, redaction, delivery, search, browser, diagnostics, and media handling are independently enforced.",
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["hermes_adapter_gauntlet", "pre_live_mission_control"],
+            ["customer_visible_commitments_enabled", "side_effect_replay_enabled"],
+            ["required_evidence_missing", "first_live_project_allows_external_commitments"],
+        ),
+        row(
+            "s10-09",
+            "Live LM Studio/local-provider routes stay shadow-only until seed Model Intelligence evals and operator promotion pass.",
+            ["model_shadow_ops", "model_efficiency_service_packet"],
+            ["model_shadow_ops", "model_efficiency_service_packet"],
+            ["model_route_promotion_enabled", "paid_provider_calls_enabled"],
+            ["model_shadow_ops_allows_live_route_mutation", "required_evidence_missing"],
+        ),
+        row(
+            "s10-10",
+            "Backup, restore, encrypted artifact descriptor, payload access receipts, and recovery readiness are target-machine verified.",
+            ["recovery_and_migration_readiness", "preserve_target_machine_outputs"],
+            ["target_machine_validation_run_packet"],
+            ["live_controls_enabled", "side_effect_replay_enabled"],
+            ["target_machine_execution_order_invalid", "sha256sum_mismatch"],
+        ),
+        row(
+            "s10-11",
+            "Break-glass halt disables workers, paid routes, customer commitments, and side effects while preserving read-only inspection.",
+            ["pre_live_mission_control", "preserve_target_machine_outputs"],
+            ["pre_live_mission_control", "target_machine_validation_run_packet"],
+            [
+                "live_controls_enabled",
+                "paid_provider_calls_enabled",
+                "customer_visible_commitments_enabled",
+                "side_effect_replay_enabled",
+            ],
+            ["run_packet_live_controls_not_disabled", "closed_control_contract_opened_live_control"],
+        ),
+    ]
+    blockers = []
+    if run_packet.get("status") != "ready_for_target_machine_execution":
+        blockers.append("target_machine_run_packet_not_ready")
+    if not closed_control_ok:
+        blockers.append("closed_control_contract_opened_live_control")
+    if any(not item["ready"] for item in rows):
+        blockers.append("pre_live_crosswalk_unmapped_or_unverified")
+    payload = {
+        "available": True,
+        "generated_at": timestamp,
+        "packet_name": "pre_live_evidence_crosswalk",
+        "status": "mapped_pre_live_handoff_evidence" if not blockers else "blocked",
+        "repo_root": str(root),
+        "source_spec": "spec/s10_pre_live_handoff.md",
+        "run_packet_path": run_packet.get("artifact_path"),
+        "run_packet_status": run_packet.get("status"),
+        "checklist_rows": rows,
+        "summary": {
+            "checklist_item_count": len(rows),
+            "ready_item_count": sum(1 for item in rows if item["ready"]),
+            "all_items_ready": all(item["ready"] for item in rows),
+            "closed_control_contract_ok": closed_control_ok,
+            "artifact_count": len(artifacts_by_name),
+        },
+        "blockers": blockers,
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+        "artifact_path": str(_runtime_pre_live_evidence_crosswalk_path(resolved)),
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_pre_live_evidence_crosswalk_artifact(resolved, payload)
+    return payload
 
 
 def _parse_sha256sums(path: Path) -> dict[str, str]:
@@ -2608,6 +3250,93 @@ def _bundle_evidence_records(bundle_dir: Path) -> dict[str, dict[str, Any]]:
     if not isinstance(records, dict):
         return {}
     return {str(key): value for key, value in records.items() if isinstance(value, dict)}
+
+
+def pre_live_bundle_verification(
+    config: IntegrationConfig | None = None,
+    *,
+    bundle_dir: str,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Verify a preserved pre-live bundle is complete enough to use as validation input."""
+    resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
+    bundle = Path(bundle_dir).expanduser().resolve()
+    sha_entries = _parse_sha256sums(bundle / "SHA256SUMS")
+    required_json_files = [
+        "pre_live_mission_control.json",
+        "hermes_adapter_gauntlet.json",
+        "first_live_project_packet.json",
+        "model_shadow_ops.json",
+        "target_machine_validation_run_packet.json",
+    ]
+    optional_json_files = ["model_efficiency_service_packet.json"]
+    file_checks = []
+    for filename in [*required_json_files, *optional_json_files]:
+        path = bundle / filename
+        parsed = _bundle_json(path)
+        actual_hash = _file_sha256(path)
+        manifest_hash = sha_entries.get(filename)
+        file_checks.append(
+            {
+                "filename": filename,
+                "required": filename in required_json_files,
+                "exists": path.is_file(),
+                "json_non_empty": bool(parsed),
+                "live_controls_disabled": parsed.get("live_controls_enabled") is False if parsed else False,
+                "sha256": actual_hash,
+                "matches_sha256sums": bool(actual_hash and manifest_hash and actual_hash == manifest_hash),
+                "status": parsed.get("status") or parsed.get("go_no_go") or parsed.get("packet_name"),
+            }
+        )
+    run_packet = _bundle_json(bundle / "target_machine_validation_run_packet.json")
+    mission = _bundle_json(bundle / "pre_live_mission_control.json")
+    closed_control_contract = run_packet.get("closed_control_contract", {})
+    execution_order_contract = run_packet.get("execution_order_contract", {})
+    blockers = []
+    if not bundle.is_dir():
+        blockers.append("pre_live_bundle_missing")
+    if not sha_entries:
+        blockers.append("sha256sums_missing_or_empty")
+    if any(item["required"] and not item["exists"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_missing")
+    if any(item["required"] and not item["json_non_empty"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_empty_or_invalid")
+    if any(item["required"] and not item["matches_sha256sums"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_checksum_mismatch")
+    if any(item["required"] and not item["live_controls_disabled"] for item in file_checks):
+        blockers.append("required_pre_live_artifact_live_controls_not_disabled")
+    if run_packet.get("status") not in {"ready_for_target_machine_execution", "blocked"}:
+        blockers.append("target_machine_run_packet_status_missing")
+    if run_packet.get("status") == "ready_for_target_machine_execution" and mission.get("go_no_go") != "ready_for_target_machine_validation":
+        blockers.append("mission_control_not_ready_for_target_machine_validation")
+    if execution_order_contract and not all(bool(value) for value in execution_order_contract.values()):
+        blockers.append("target_machine_execution_order_invalid")
+    if closed_control_contract and any(bool(value) for value in closed_control_contract.values()):
+        blockers.append("closed_control_contract_opened_live_control")
+    payload = {
+        "available": True,
+        "generated_at": as_of or _utc_now(),
+        "packet_name": "pre_live_bundle_verification",
+        "status": "verified_pre_live_bundle" if not blockers else "blocked",
+        "bundle_dir": str(bundle),
+        "sha256sums_path": str(bundle / "SHA256SUMS"),
+        "file_checks": file_checks,
+        "summary": {
+            "required_file_count": len(required_json_files),
+            "required_files_present": sum(1 for item in file_checks if item["required"] and item["exists"]),
+            "required_json_non_empty": all(item["json_non_empty"] for item in file_checks if item["required"]),
+            "required_checksums_match": all(item["matches_sha256sums"] for item in file_checks if item["required"]),
+            "live_controls_disabled": all(item["live_controls_disabled"] for item in file_checks if item["required"]),
+            "target_machine_status": run_packet.get("status"),
+        },
+        "blockers": blockers,
+        "live_controls_enabled": False,
+        "activation_effect": "none",
+        "artifact_path": str(_runtime_pre_live_bundle_verification_path(resolved)),
+    }
+    payload["packet_hash"] = _stable_json_hash({k: v for k, v in payload.items() if k != "packet_hash"})
+    _write_pre_live_bundle_verification_artifact(resolved, payload)
+    return payload
 
 
 def target_machine_evidence_check(
@@ -3987,7 +4716,7 @@ def latest_recovery_readiness(config: IntegrationConfig | None = None) -> dict[s
 
 
 
-def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) -> dict[str, bool]:
+def _hermes_offline_contract_checks(config: IntegrationConfig, repo_root: Path) -> dict[str, bool]:
     profile_doc = _read_json_yaml(_runtime_profile_config_path(config)) or {}
     workspace_doc = _read_json_yaml(_runtime_workspace_manifest_path(config)) or {}
     local_provider_doc = _read_json_yaml(_runtime_local_provider_doctor_path(config)) or {}
@@ -4003,10 +4732,10 @@ def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) ->
     plugin_hooks = profile_config.get("plugin_hooks", {})
     local_provider_profile = profile_config.get("local_provider", {})
     return {
-        "hermes_floor_v012": MANIFEST_HERMES_VERSION_FLOOR >= (0, 12, 0)
-        and CHECKLIST_HERMES_VERSION_FLOOR >= (0, 12, 0),
+        "hermes_floor_v014": MANIFEST_HERMES_VERSION_FLOOR >= (0, 14, 0)
+        and CHECKLIST_HERMES_VERSION_FLOOR >= (0, 14, 0),
         "one_shot_contract_declared": "hermes -z" in checklist_text
-        and "Hermes v0.12.0+" in checklist_text,
+        and "Hermes v0.14.0+" in checklist_text,
         "lm_studio_doctor_deferred": local_provider_doc.get("provider") == "lm_studio"
         and local_provider_doc.get("status") == "DEFERRED_UNTIL_LIVE_HERMES"
         and local_provider_profile.get("defer_without_hermes") is True,
@@ -4016,7 +4745,9 @@ def _v012_offline_contract_checks(config: IntegrationConfig, repo_root: Path) ->
         and curator_profile.get("pinned_skills_mutable") is False,
         "pinned_skills_before_curator": curator_profile.get("enabled") is False
         and set(EXPECTED_PINNED_SKILLS).issubset(set(curator_profile.get("pinned_skills") or [])),
-        "approval_hooks_declared": set(EXPECTED_V012_HOOKS).issubset(set(plugin_hooks.get("required_hooks") or [])),
+        "approval_boundary_declared": set(EXPECTED_APPROVAL_BOUNDARY_EVENTS).issubset(
+            set(plugin_hooks.get("required_hooks") or [])
+        ),
         "dashboard_surfaces_declared": set(EXPECTED_DASHBOARD_SURFACES).issubset(set(workspace_doc.get("dashboard_surfaces") or []))
         and workspace_doc.get("custom_dashboard_plugin") is False,
         "dashboard_offline_mockable": workspace_doc.get("offline_mockable") is True,
@@ -4465,11 +5196,18 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "hermes_adapter_gauntlet_command": _command_string(config, "--hermes-adapter-gauntlet", repo_root),
         "first_live_project_packet_command": _command_string(config, "--first-live-project-packet", repo_root),
         "model_shadow_ops_command": _command_string(config, "--model-shadow-ops", repo_root),
+        "model_efficiency_service_packet_command": _command_string(
+            config,
+            "--model-efficiency-service-packet",
+            repo_root,
+        ),
+        "pre_live_completion_bundle_command": _command_string(config, "--pre-live-completion-bundle", repo_root),
         "target_machine_validation_run_packet_command": _command_string(
             config,
             "--target-machine-validation-run-packet",
             repo_root,
         ),
+        "pre_live_bundle_verification_command": _command_string(config, "--pre-live-bundle-verification", repo_root),
         "target_machine_evidence_check_command": _command_string(config, "--target-machine-evidence-check", repo_root),
         "first_live_project_acceptance_check_command": _command_string(
             config,
@@ -4498,7 +5236,10 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "hermes_adapter_gauntlet",
             "first_live_project_packet",
             "model_shadow_ops",
+            "model_efficiency_service_packet",
+            "pre_live_completion_bundle",
             "target_machine_validation_run_packet",
+            "pre_live_bundle_verification",
             "target_machine_evidence_check",
             "first_live_project_acceptance_check",
             "self_improvement_evidence_pipeline",
@@ -4553,7 +5294,7 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
         "4. Confirm the repo-local contract harness and proxy self-test pass.",
         "5. Run the evidence factory and inspect the replay readiness report.",
         "6. Confirm the task-loop and research-cron proofs pass.",
-        "7. If Hermes is installed, run readiness and verify Hermes v0.12.0+, `hermes -z`, LM Studio/local-provider doctor, approval hooks, Curator report-first state, and live profile/config surface.",
+        "7. If Hermes is installed, run readiness and verify Hermes v0.14.0+, `hermes -z`, local-provider doctor, approval event streaming, Curator report-first state, and live profile/config surface.",
         "8. Run recovery-readiness and confirm the packet remains read-only with live Hermes, dashboard, provider, and payload controls disabled.",
         "9. Run Hermes adapter-readiness and confirm it links to the latest recovery packet while live dashboard/customer/provider controls stay disabled.",
         "10. Open the Hermes native dashboard and confirm Models, Chat, Plugins, Kanban, Agent Profiles, Analytics, gates, traces, quarantine review, replay readiness, runtime halt state, and milestone health are visible.",
@@ -4708,12 +5449,39 @@ def _write_runtime_support_artifacts(config: IntegrationConfig, repo_root: Path)
             "live_controls_enabled": False,
         },
     )
+    _write_model_efficiency_service_packet_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--model-efficiency-service-packet", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_pre_live_completion_bundle_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--pre-live-completion-bundle", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
     _write_target_machine_validation_run_packet_artifact(
         config,
         {
             "available": False,
             "status": "NOT_RUN",
             "command": _command_string(config, "--target-machine-validation-run-packet", repo_root),
+            "live_controls_enabled": False,
+        },
+    )
+    _write_pre_live_bundle_verification_artifact(
+        config,
+        {
+            "available": False,
+            "status": "NOT_RUN",
+            "command": _command_string(config, "--pre-live-bundle-verification", repo_root),
             "live_controls_enabled": False,
         },
     )
@@ -4843,7 +5611,11 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
         "hermes_adapter_gauntlet_path": str(_runtime_hermes_adapter_gauntlet_path(resolved)),
         "first_live_project_packet_path": str(_runtime_first_live_project_packet_path(resolved)),
         "model_shadow_ops_path": str(_runtime_model_shadow_ops_path(resolved)),
+        "model_efficiency_service_packet_path": str(_runtime_model_efficiency_service_packet_path(resolved)),
+        "pre_live_completion_bundle_path": str(_runtime_pre_live_completion_bundle_path(resolved)),
+        "pre_live_evidence_crosswalk_path": str(_runtime_pre_live_evidence_crosswalk_path(resolved)),
         "target_machine_validation_run_packet_path": str(_runtime_target_machine_validation_run_packet_path(resolved)),
+        "pre_live_bundle_verification_path": str(_runtime_pre_live_bundle_verification_path(resolved)),
         "target_machine_evidence_check_path": str(_runtime_target_machine_evidence_check_path(resolved)),
         "first_live_project_acceptance_check_path": str(_runtime_first_live_project_acceptance_check_path(resolved)),
         "self_improvement_snapshot_path": str(_runtime_self_improvement_snapshot_path(resolved)),
@@ -4911,11 +5683,19 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
             "hermes_adapter_gauntlet": _command_string(resolved, "--hermes-adapter-gauntlet", root),
             "first_live_project_packet": _command_string(resolved, "--first-live-project-packet", root),
             "model_shadow_ops": _command_string(resolved, "--model-shadow-ops", root),
+            "model_efficiency_service_packet": _command_string(
+                resolved,
+                "--model-efficiency-service-packet",
+                root,
+            ),
+            "pre_live_completion_bundle": _command_string(resolved, "--pre-live-completion-bundle", root),
+            "pre_live_evidence_crosswalk": _command_string(resolved, "--pre-live-evidence-crosswalk", root),
             "target_machine_validation_run_packet": _command_string(
                 resolved,
                 "--target-machine-validation-run-packet",
                 root,
             ),
+            "pre_live_bundle_verification": _command_string(resolved, "--pre-live-bundle-verification", root),
             "target_machine_evidence_check": _command_string(resolved, "--target-machine-evidence-check", root),
             "first_live_project_acceptance_check": _command_string(
                 resolved,
@@ -4995,11 +5775,20 @@ def install_runtime_profile(config: IntegrationConfig, *, repo_root: str | None 
     _write_launcher(launcher_paths["first_live_project_packet"], resolved, root, "--first-live-project-packet")
     _write_launcher(launcher_paths["model_shadow_ops"], resolved, root, "--model-shadow-ops")
     _write_launcher(
+        launcher_paths["model_efficiency_service_packet"],
+        resolved,
+        root,
+        "--model-efficiency-service-packet",
+    )
+    _write_launcher(launcher_paths["pre_live_completion_bundle"], resolved, root, "--pre-live-completion-bundle")
+    _write_launcher(launcher_paths["pre_live_evidence_crosswalk"], resolved, root, "--pre-live-evidence-crosswalk")
+    _write_launcher(
         launcher_paths["target_machine_validation_run_packet"],
         resolved,
         root,
         "--target-machine-validation-run-packet",
     )
+    _write_launcher(launcher_paths["pre_live_bundle_verification"], resolved, root, "--pre-live-bundle-verification")
     _write_launcher(launcher_paths["target_machine_evidence_check"], resolved, root, "--target-machine-evidence-check")
     _write_launcher(
         launcher_paths["first_live_project_acceptance_check"],
@@ -5152,7 +5941,10 @@ def doctor_runtime(
         "hermes_adapter_gauntlet": _runtime_hermes_adapter_gauntlet_path(resolved).is_file(),
         "first_live_project_packet": _runtime_first_live_project_packet_path(resolved).is_file(),
         "model_shadow_ops": _runtime_model_shadow_ops_path(resolved).is_file(),
+        "model_efficiency_service_packet": _runtime_model_efficiency_service_packet_path(resolved).is_file(),
+        "pre_live_completion_bundle": _runtime_pre_live_completion_bundle_path(resolved).is_file(),
         "target_machine_validation_run_packet": _runtime_target_machine_validation_run_packet_path(resolved).is_file(),
+        "pre_live_bundle_verification": _runtime_pre_live_bundle_verification_path(resolved).is_file(),
         "target_machine_evidence_check": _runtime_target_machine_evidence_check_path(resolved).is_file(),
         "first_live_project_acceptance_check": _runtime_first_live_project_acceptance_check_path(resolved).is_file(),
         "self_improvement_snapshot": _runtime_self_improvement_snapshot_path(resolved).is_file(),
@@ -5178,7 +5970,10 @@ def doctor_runtime(
         "hermes_adapter_gauntlet_launcher": launcher_paths["hermes_adapter_gauntlet"].is_file(),
         "first_live_project_packet_launcher": launcher_paths["first_live_project_packet"].is_file(),
         "model_shadow_ops_launcher": launcher_paths["model_shadow_ops"].is_file(),
+        "model_efficiency_service_packet_launcher": launcher_paths["model_efficiency_service_packet"].is_file(),
+        "pre_live_completion_bundle_launcher": launcher_paths["pre_live_completion_bundle"].is_file(),
         "target_machine_validation_run_packet_launcher": launcher_paths["target_machine_validation_run_packet"].is_file(),
+        "pre_live_bundle_verification_launcher": launcher_paths["pre_live_bundle_verification"].is_file(),
         "target_machine_evidence_check_launcher": launcher_paths["target_machine_evidence_check"].is_file(),
         "first_live_project_acceptance_check_launcher": launcher_paths["first_live_project_acceptance_check"].is_file(),
         "self_improvement_evidence_pipeline_launcher": launcher_paths["self_improvement_evidence_pipeline"].is_file(),
@@ -5282,7 +6077,7 @@ def exercise_hermes_contract(
         )
         doctor = doctor_runtime(registry, config=resolved, bootstrap_if_needed=False)
         contract_checks = _validate_profile_artifacts(resolved, root).checks
-        v012_contract_checks = _v012_offline_contract_checks(resolved, root)
+        hermes_contract_checks = _hermes_offline_contract_checks(resolved, root)
         if not bootstrap.ok:
             issues.append("bootstrap failed")
         if not doctor.ok:
@@ -5290,9 +6085,9 @@ def exercise_hermes_contract(
         failed_contract_checks = [name for name, ok in contract_checks.items() if not ok]
         if failed_contract_checks:
             issues.append(f"profile contract failed: {', '.join(failed_contract_checks)}")
-        failed_v012_contract_checks = [name for name, ok in v012_contract_checks.items() if not ok]
-        if failed_v012_contract_checks:
-            issues.append(f"Hermes v0.12 contract failed: {', '.join(failed_v012_contract_checks)}")
+        failed_hermes_contract_checks = [name for name, ok in hermes_contract_checks.items() if not ok]
+        if failed_hermes_contract_checks:
+            issues.append(f"Hermes v0.14 contract failed: {', '.join(failed_hermes_contract_checks)}")
 
         session_id = bootstrap.session_context.session_id
         correlation_id = f"contract-route-{generate_uuid_v7()}"
@@ -5600,7 +6395,7 @@ def exercise_hermes_contract(
             blocked_dispatch_reason=blocked_dispatch_reason,
             restart_result=restart_result,
             final_runtime_status=final_runtime_status,
-            v012_contract_checks=v012_contract_checks,
+            hermes_contract_checks=hermes_contract_checks,
             trace_id=trace_id,
             issues=issues,
         )
@@ -7115,7 +7910,7 @@ def _readiness_actions(
     if replay_report.get("status") != "READY_FOR_BROADER_REPLAY":
         actions.append(f"Grow the replay corpus before live promotion: `{bounded_evidence_command}`")
     if not hermes_installed:
-        actions.append(f"Install Hermes Agent v0.12.0+ and rerun live readiness: `{readiness_command}`")
+        actions.append(f"Install Hermes Agent v0.14.0+ and rerun live readiness: `{readiness_command}`")
     elif not profile_listed or missing_seed_tools or failed_config_checks:
         actions.append("Repair the Hermes profile/tool/config surface, then rerun the readiness check.")
     if cli_smoke_attempted and not cli_smoke_ok:
@@ -7290,7 +8085,7 @@ def run_flywheel_drill(
     tool_registry: HermesToolRegistry | None = None,
     report_limit: int = DEFAULT_REPLAY_REPORT_LIMIT,
 ) -> FlywheelDrillResult:
-    """Run one bounded CLI-first flywheel proof without requiring a custom dashboard."""
+    """Run one bounded CLI-first flywheel proof using kernel-owned operator packets."""
     resolved = _normalize_runtime_layout(config or IntegrationConfig()).resolve_paths()
     root = Path(repo_root).expanduser().resolve() if repo_root else _repo_root()
     registry = tool_registry or MockHermesRuntime(data_dir=resolved.data_dir)
@@ -8414,7 +9209,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--known-bad-hardening-operator-patch-gate", action="store_true", help="Create the manual-only operator patch gate packet for a known-bad hardening follow-on packet")
     parser.add_argument("--mac-studio-day-one", action="store_true", help="Generate the one-command Mac Studio rehearsal and handoff package")
     parser.add_argument("--recovery-readiness", action="store_true", help="Create or surface the read-only recovery-readiness packet")
-    parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.13 adapter-readiness packet")
+    parser.add_argument("--hermes-adapter-readiness", action="store_true", help="Create or surface the read-only Hermes v0.14 adapter-readiness packet")
     parser.add_argument("--migration-readiness", action="store_true", help="Create or surface the read-only repo migration-readiness map")
     parser.add_argument("--pre-hermes-readiness", action="store_true", help="Create or surface the read-only pre-Hermes readiness summary")
     parser.add_argument("--readiness-suite", action="store_true", help="Run all read-only pre-Hermes readiness checks and print invariant status")
@@ -8422,10 +9217,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-adapter-gauntlet", action="store_true", help="Create the repo-local Hermes adapter certification gauntlet")
     parser.add_argument("--first-live-project-packet", action="store_true", help="Create the productized first-live-project handoff packet")
     parser.add_argument("--model-shadow-ops", action="store_true", help="Create the seed Model Intelligence shadow-ops packet")
+    parser.add_argument("--model-efficiency-service-packet", action="store_true", help="Create the local-only governed model-efficiency service packet")
+    parser.add_argument("--pre-live-completion-bundle", action="store_true", help="Create the all-ten pre-live coding completion proof bundle")
+    parser.add_argument("--pre-live-evidence-crosswalk", action="store_true", help="Map pre-live handoff checklist items to repo-owned evidence and blockers")
     parser.add_argument(
         "--target-machine-validation-run-packet",
         action="store_true",
         help="Create the concrete target-machine validation run packet and evidence manifest",
+    )
+    parser.add_argument(
+        "--pre-live-bundle-verification",
+        action="store_true",
+        help="Verify a preserved pre-live artifact bundle before target-machine use",
     )
     parser.add_argument(
         "--target-machine-evidence-check",
@@ -8452,7 +9255,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alerts-dir", default="~/.hermes/alerts/")
     parser.add_argument("--profile-name", default="hybrid-autonomous-ai")
     parser.add_argument("--hermes-bin", default="hermes", help="Override the Hermes CLI binary used for readiness checks")
-    parser.add_argument("--hermes-version", default="0.13.0", help="Hermes version label for adapter-readiness packets")
+    parser.add_argument("--hermes-version", default="0.14.0", help="Hermes version label for adapter-readiness packets")
     parser.add_argument("--skip-cli-smoke", action="store_true", help="Skip the live Hermes -z smoke test inside --readiness")
     parser.add_argument("--smoke-query", default=None, help="Override the readiness chat prompt used by --readiness")
     parser.add_argument("--model-name", default="local-default")
@@ -8880,11 +9683,47 @@ def _main_impl(
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0
 
+    if args.model_efficiency_service_packet:
+        payload = model_efficiency_service_packet(
+            config=config,
+            repo_root=args.repo_root,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.pre_live_completion_bundle:
+        payload = pre_live_completion_bundle(
+            config=config,
+            repo_root=args.repo_root,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
+
+    if args.pre_live_evidence_crosswalk:
+        payload = pre_live_evidence_crosswalk(
+            config=config,
+            repo_root=args.repo_root,
+            candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
+
     if args.target_machine_validation_run_packet:
         payload = target_machine_validation_run_packet(
             config=config,
             repo_root=args.repo_root,
             candidate_limit=args.report_limit,
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0 if payload["status"] != "blocked" else 1
+
+    if args.pre_live_bundle_verification:
+        if not args.bundle_dir:
+            parser.error("--pre-live-bundle-verification requires --bundle-dir")
+        payload = pre_live_bundle_verification(
+            config=config,
+            bundle_dir=args.bundle_dir,
         )
         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
         return 0 if payload["status"] != "blocked" else 1

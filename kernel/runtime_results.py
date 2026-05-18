@@ -166,7 +166,7 @@ class HermesContractHarnessResult:
     blocked_dispatch_reason: str | None
     restart_result: dict[str, Any] | None
     final_runtime_status: dict[str, Any] | None
-    v012_contract_checks: dict[str, bool]
+    hermes_contract_checks: dict[str, bool]
     trace_id: str | None
     issues: list[str]
 
