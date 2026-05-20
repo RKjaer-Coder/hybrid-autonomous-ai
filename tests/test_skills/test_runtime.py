@@ -1595,6 +1595,18 @@ def test_target_machine_validation_run_packet_preserves_evidence_manifest(tmp_pa
     assert payload["component_summary"]["model_efficiency_seed_task_class_count"] == 3
     assert all(payload["execution_order_contract"].values())
     assert all(payload["replay_projection_proof_contract"].values())
+    assert payload["replay_projection_proof_records_contract"] is True
+    assert {
+        "proof_contract_key",
+        "evidence_id",
+        "reconstructed_intent",
+        "projected_state",
+        "forbidden_side_effect_reexecution",
+    }.issubset(payload["replay_projection_proof_records"][0])
+    assert all(
+        item["forbidden_side_effect_reexecution"]["allowed"] is False
+        for item in payload["replay_projection_proof_records"]
+    )
     assert payload["closed_control_contract"] == {
         "live_controls_enabled": False,
         "dashboard_writes_enabled": False,
@@ -1643,6 +1655,8 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "component_summary",
         "execution_order_contract",
         "replay_projection_proof_contract",
+        "replay_projection_proof_records",
+        "replay_projection_proof_records_contract",
         "closed_control_contract",
         "blockers",
         "fail_closed_controls",
@@ -1672,6 +1686,17 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "external_side_effect_replay_disabled": True,
         "manifest_artifacts_hash_bound_before_live_authority": True,
     }
+    assert run_packet["replay_projection_proof_records_contract"] is True
+    assert {record["proof_contract_key"] for record in run_packet["replay_projection_proof_records"]} == set(
+        run_packet["replay_projection_proof_contract"]
+    )
+    assert all(record["reconstructed_intent"] for record in run_packet["replay_projection_proof_records"])
+    assert all(record["projected_state"] for record in run_packet["replay_projection_proof_records"])
+    assert all(
+        record["forbidden_side_effect_reexecution"]["allowed"] is False
+        and record["forbidden_side_effect_reexecution"]["control"]
+        for record in run_packet["replay_projection_proof_records"]
+    )
     assert {item["name"] for item in run_packet["evidence_manifest"]} == {
         "pre_live_mission_control",
         "hermes_adapter_gauntlet",
@@ -2242,6 +2267,58 @@ def test_target_machine_evidence_check_fails_closed_when_run_packet_proof_contra
     assert "replay_projection_contract_not_proven" in payload["blockers"]
     assert payload["replay_projection_contract"]["run_packet_proof_contract_declared"] is False
     assert payload["replay_projection_contract"]["required_replay_projection_evidence_non_ambiguous"] is True
+    assert payload["live_controls_enabled"] is False
+
+
+def test_target_machine_evidence_check_fails_closed_on_undifferentiated_proof_records(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "target-machine-bundle"
+    bundle.mkdir()
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        (bundle / source.name).write_bytes(source.read_bytes())
+    drifted_packet = dict(run_packet)
+    drifted_packet["replay_projection_proof_records"] = [
+        {
+            **dict(run_packet["replay_projection_proof_records"][0]),
+            "projected_state": "",
+        },
+        *run_packet["replay_projection_proof_records"][1:],
+    ]
+    run_packet_path = bundle / Path(run_packet["artifact_path"]).name
+    run_packet_path.write_text(json.dumps(drifted_packet, sort_keys=True), encoding="utf-8")
+    evidence_records = _bound_target_machine_evidence_records(run_packet)
+    (bundle / "evidence_records.json").write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
+    sha_lines = []
+    for path in sorted(bundle.iterdir()):
+        if path.name == "SHA256SUMS":
+            continue
+        sha_lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+    (bundle / "SHA256SUMS").write_text("\n".join(sha_lines) + "\n", encoding="utf-8")
+
+    payload = target_machine_evidence_check(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:09:00+00:00",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "replay_projection_contract_not_proven" in payload["blockers"]
+    assert (
+        payload["replay_projection_contract"]["run_packet_proof_records_distinguish_replay_projection_effects"]
+        is False
+    )
     assert payload["live_controls_enabled"] is False
 
 
