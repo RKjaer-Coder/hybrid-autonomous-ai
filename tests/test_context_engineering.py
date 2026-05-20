@@ -177,6 +177,31 @@ def test_first_live_project_acceptance_check_packet_preserves_gate_shape(tmp_pat
         "artifact_contract": {"external_delivery": "prepared_intent_only_until_operator_gate"},
         "workflow": [{"operator_gate_required": True, "external_side_effects_executed": False}],
         "dry_run": {"close_path": {"feedback_ingested": True, "close_or_continue_requires_operator_gate": True}},
+        "operator_acceptance_packet": {
+            "customer_visible_delivery": {
+                "artifact_contract_key": "external_delivery",
+                "expected_value": "prepared_intent_only_until_operator_gate",
+                "local_artifact_only": True,
+                "operator_gate_required": True,
+            },
+            "feedback_ingestion": {
+                "close_path_key": "feedback_ingested",
+                "feedback_ingested": True,
+                "close_or_continue_requires_operator_gate": True,
+            },
+            "external_commitments": {
+                "project_key": "external_commitments_allowed",
+                "allowed": False,
+                "workflow_external_side_effects_executed": False,
+            },
+            "operator_signoff": {
+                "required_authority": "operator_gate",
+                "required_signoffs": ["operator_reviews_local_artifact_before_customer_delivery"],
+                "default_on_timeout": "keep_local_only",
+            },
+            "fail_closed_unless_all_bindings_present": True,
+        },
+        "operator_signoffs_required": ["operator_reviews_local_artifact_before_customer_delivery"],
         "live_controls_enabled": False,
     }
 
@@ -189,7 +214,55 @@ def test_first_live_project_acceptance_check_packet_preserves_gate_shape(tmp_pat
     assert payload["status"] == "accepted_pre_live_local_only"
     assert payload["blockers"] == []
     assert all(payload["checks"].values())
+    assert all(payload["acceptance_contract"].values())
     assert payload["activation_effect"] == "none"
+
+
+def test_first_live_project_acceptance_check_packet_fails_closed_on_missing_operator_binding(tmp_path):
+    packet = {
+        "fixture_id": "fixture-1",
+        "summary": {"local_artifact_only": True, "external_commitments_allowed": False},
+        "artifact_contract": {"external_delivery": "prepared_intent_only_until_operator_gate"},
+        "workflow": [{"operator_gate_required": True, "external_side_effects_executed": False}],
+        "dry_run": {"close_path": {"feedback_ingested": True, "close_or_continue_requires_operator_gate": True}},
+        "operator_acceptance_packet": {
+            "customer_visible_delivery": {
+                "artifact_contract_key": "external_delivery",
+                "expected_value": "prepared_intent_only_until_operator_gate",
+                "local_artifact_only": True,
+                "operator_gate_required": True,
+            },
+            "feedback_ingestion": {
+                "close_path_key": "feedback_ingested",
+                "feedback_ingested": True,
+                "close_or_continue_requires_operator_gate": True,
+            },
+            "external_commitments": {
+                "project_key": "external_commitments_allowed",
+                "allowed": False,
+                "workflow_external_side_effects_executed": False,
+            },
+            "operator_signoff": {
+                "required_authority": "operator_gate",
+                "required_signoffs": [],
+                "default_on_timeout": "keep_local_only",
+            },
+            "fail_closed_unless_all_bindings_present": True,
+        },
+        "operator_signoffs_required": ["operator_reviews_local_artifact_before_customer_delivery"],
+        "live_controls_enabled": False,
+    }
+
+    payload = first_live_project_acceptance_check_packet(
+        packet=packet,
+        generated_at="2026-05-12T00:00:00+00:00",
+        artifact_path=tmp_path / "acceptance.json",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "operator_acceptance_contract_operator_signoff_bound" in payload["blockers"]
+    assert payload["acceptance_contract"]["operator_signoff_bound"] is False
+    assert payload["live_controls_enabled"] is False
 
 
 def test_pre_live_evidence_crosswalk_row_fails_closed_on_open_control(tmp_path):

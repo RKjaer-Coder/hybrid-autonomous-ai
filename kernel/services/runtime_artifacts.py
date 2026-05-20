@@ -417,6 +417,13 @@ def first_live_project_acceptance_check_packet(
     workflow = packet.get("workflow", [])
     dry_run = packet.get("dry_run", {})
     close_path = dry_run.get("close_path", {}) if isinstance(dry_run, dict) else {}
+    operator_packet = packet.get("operator_acceptance_packet", {})
+    acceptance_contract = _first_live_project_acceptance_contract(
+        packet=packet,
+        workflow=workflow,
+        close_path=close_path,
+        operator_packet=operator_packet,
+    )
     checks = {
         "local_only_artifact_output": bool(packet.get("summary", {}).get("local_artifact_only"))
         and packet.get("artifact_contract", {}).get("external_delivery")
@@ -431,6 +438,11 @@ def first_live_project_acceptance_check_packet(
         "external_commitments_disabled": packet.get("summary", {}).get("external_commitments_allowed") is False,
     }
     blockers = [name for name, ok in checks.items() if not ok]
+    blockers.extend(
+        f"operator_acceptance_contract_{name}"
+        for name, ok in acceptance_contract.items()
+        if not ok
+    )
     return {
         "available": True,
         "generated_at": generated_at,
@@ -438,10 +450,63 @@ def first_live_project_acceptance_check_packet(
         "status": "accepted_pre_live_local_only" if not blockers else "blocked",
         "fixture_id": packet.get("fixture_id"),
         "checks": checks,
+        "acceptance_contract": acceptance_contract,
         "blockers": blockers,
         "live_controls_enabled": False,
         "activation_effect": "none",
         "artifact_path": str(artifact_path),
+    }
+
+
+def _first_live_project_acceptance_contract(
+    *,
+    packet: dict[str, Any],
+    workflow: Any,
+    close_path: dict[str, Any],
+    operator_packet: Any,
+) -> dict[str, bool]:
+    if not isinstance(operator_packet, dict):
+        operator_packet = {}
+    delivery = operator_packet.get("customer_visible_delivery", {})
+    feedback = operator_packet.get("feedback_ingestion", {})
+    commitments = operator_packet.get("external_commitments", {})
+    signoff = operator_packet.get("operator_signoff", {})
+    signoffs_required = packet.get("operator_signoffs_required", [])
+    workflow_items = [item for item in workflow if isinstance(item, dict)] if isinstance(workflow, list) else []
+    return {
+        "customer_visible_delivery_bound": (
+            isinstance(delivery, dict)
+            and delivery.get("artifact_contract_key") == "external_delivery"
+            and delivery.get("expected_value") == "prepared_intent_only_until_operator_gate"
+            and delivery.get("local_artifact_only") is True
+            and delivery.get("operator_gate_required") is True
+            and packet.get("artifact_contract", {}).get("external_delivery") == delivery.get("expected_value")
+        ),
+        "feedback_ingestion_bound": (
+            isinstance(feedback, dict)
+            and feedback.get("close_path_key") == "feedback_ingested"
+            and feedback.get("feedback_ingested") is True
+            and feedback.get("close_or_continue_requires_operator_gate") is True
+            and close_path.get("feedback_ingested") is True
+            and close_path.get("close_or_continue_requires_operator_gate") is True
+        ),
+        "external_commitments_bound": (
+            isinstance(commitments, dict)
+            and commitments.get("project_key") == "external_commitments_allowed"
+            and commitments.get("allowed") is False
+            and commitments.get("workflow_external_side_effects_executed") is False
+            and packet.get("summary", {}).get("external_commitments_allowed") is False
+            and all(item.get("external_side_effects_executed") is False for item in workflow_items)
+        ),
+        "operator_signoff_bound": (
+            isinstance(signoff, dict)
+            and signoff.get("required_authority") == "operator_gate"
+            and signoff.get("default_on_timeout") == "keep_local_only"
+            and isinstance(signoff.get("required_signoffs"), list)
+            and bool(signoff.get("required_signoffs"))
+            and set(signoff.get("required_signoffs", [])).issubset(set(signoffs_required))
+        ),
+        "fail_closed": operator_packet.get("fail_closed_unless_all_bindings_present") is True,
     }
 
 
