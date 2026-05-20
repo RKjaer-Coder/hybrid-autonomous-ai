@@ -60,6 +60,22 @@ PRE_LIVE_FAIL_CLOSED_CONTROLS: tuple[str, ...] = (
     "side_effect_replay",
 )
 
+TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS: tuple[str, ...] = (
+    "first_live_project_events_before_projection",
+    "readiness_requires_projection_checks",
+    "resume_replay_reconstructs_intents_only",
+    "external_side_effect_replay_disabled",
+    "manifest_artifacts_hash_bound_before_live_authority",
+)
+
+TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE: tuple[str, ...] = (
+    "projection_checks_verified",
+    "first_live_project_events_before_projection_verified",
+    "resume_replay_intents_reconstructed_only",
+    "external_side_effect_replay_disabled_verified",
+    "manifest_artifacts_hash_bound_before_live_authority",
+)
+
 
 def runtime_artifact_path(config: IntegrationConfig, artifact_name: str) -> Path:
     paths = runtime_support_artifact_paths(config)
@@ -187,6 +203,17 @@ def target_machine_evidence_check_packet(
         if item in required_evidence
         and (record.get("status") in {"ambiguous", "stale"} or record.get("ambiguous") is True)
     ]
+    required_replay_projection_evidence = [
+        item for item in TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE if item in required_evidence
+    ]
+    missing_replay_projection_evidence = [
+        item for item in TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE if item not in required_evidence
+    ]
+    ambiguous_replay_projection_evidence = [
+        item
+        for item in required_replay_projection_evidence
+        if item in ambiguous_required_evidence
+    ]
     artifact_results = []
     for item in packet.get("evidence_manifest", []):
         if not isinstance(item, dict):
@@ -233,14 +260,20 @@ def target_machine_evidence_check_packet(
     closed_control_contract_ok = pre_live_controls_are_closed(closed_control_contract)
     if packet and not closed_control_contract_ok:
         blockers.append("closed_control_contract_opened_live_control")
+    proof_contract = packet.get("replay_projection_proof_contract", {})
     required_artifact_names = sorted(
         str(item.get("name") or Path(str(item.get("path", ""))).stem)
         for item in packet.get("evidence_manifest", [])
         if isinstance(item, dict)
     )
     replay_projection_contract = {
-        "packet_declares_events_before_projection": all(
-            bool(step.get("fail_closed_on_missing_evidence")) for step in packet.get("run_steps", []) if isinstance(step, dict)
+        "run_packet_proof_contract_declared": isinstance(proof_contract, dict)
+        and all(proof_contract.get(key) is True for key in TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS),
+        "required_replay_projection_evidence_declared": not missing_replay_projection_evidence,
+        "required_replay_projection_evidence_non_ambiguous": (
+            bool(required_replay_projection_evidence)
+            and not ambiguous_replay_projection_evidence
+            and all(item not in missing_required_evidence for item in required_replay_projection_evidence)
         ),
         "external_side_effect_replay_disabled": (
             isinstance(closed_control_contract, dict)
@@ -267,6 +300,9 @@ def target_machine_evidence_check_packet(
         "run_packet_path": str(packet_path),
         "sha256sums_path": str(sha_path),
         "required_evidence": required_evidence,
+        "required_replay_projection_evidence": required_replay_projection_evidence,
+        "missing_replay_projection_evidence": missing_replay_projection_evidence,
+        "ambiguous_replay_projection_evidence": ambiguous_replay_projection_evidence,
         "required_artifacts": required_artifact_names,
         "missing_required_evidence": missing_required_evidence,
         "ambiguous_required_evidence": ambiguous_required_evidence,
