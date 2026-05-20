@@ -2419,6 +2419,40 @@ def first_live_project_packet(
                 "operator_gate_required": phase["phase"] in {"validate", "ship", "operate"},
             }
         )
+    operator_signoffs_required = [
+        "operator_reviews_local_artifact_before_customer_delivery",
+        "operator_confirms_feedback_ingestion_path",
+        "operator_confirms_no_external_commitments_before_gate",
+        "operator_confirms_live_controls_closed",
+    ]
+    operator_acceptance_packet = {
+        "customer_visible_delivery": {
+            "artifact_contract_key": "external_delivery",
+            "expected_value": "prepared_intent_only_until_operator_gate",
+            "local_artifact_only": dry_run["acceptance"]["local_artifact_only"],
+            "operator_gate_required": True,
+        },
+        "feedback_ingestion": {
+            "close_path_key": "feedback_ingested",
+            "feedback_ingested": bool(dry_run.get("close_path", {}).get("feedback_ingested")),
+            "close_or_continue_requires_operator_gate": bool(
+                dry_run.get("close_path", {}).get("close_or_continue_requires_operator_gate")
+            ),
+        },
+        "external_commitments": {
+            "project_key": "external_commitments_allowed",
+            "allowed": fixture["project"]["external_commitments_allowed"],
+            "workflow_external_side_effects_executed": any(
+                item["external_side_effects_executed"] for item in workflow
+            ),
+        },
+        "operator_signoff": {
+            "required_authority": "operator_gate",
+            "required_signoffs": operator_signoffs_required,
+            "default_on_timeout": "keep_local_only",
+        },
+        "fail_closed_unless_all_bindings_present": True,
+    }
     payload = {
         "available": True,
         "generated_at": as_of or _utc_now(),
@@ -2428,8 +2462,10 @@ def first_live_project_packet(
         "artifact_contract": artifact_contract,
         "workflow": workflow,
         "dry_run": dry_run,
+        "operator_acceptance_packet": operator_acceptance_packet,
         "acceptance_criteria": fixture["acceptance_criteria"],
         "side_effect_expectations": fixture["side_effect_expectations"],
+        "operator_signoffs_required": operator_signoffs_required,
         "summary": {
             "ready_for_target_machine_fixture": True,
             "phase_count": len(workflow),

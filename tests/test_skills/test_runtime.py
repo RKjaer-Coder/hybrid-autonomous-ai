@@ -1478,6 +1478,11 @@ def test_first_live_project_packet_is_productized_local_only_loop(tmp_path):
     assert payload["artifact_contract"]["external_delivery"] == "prepared_intent_only_until_operator_gate"
     assert [item["phase"] for item in payload["workflow"]] == ["validate", "build", "ship", "operate"]
     assert all(item["external_side_effects_executed"] is False for item in payload["workflow"])
+    assert payload["operator_acceptance_packet"]["fail_closed_unless_all_bindings_present"] is True
+    assert payload["operator_acceptance_packet"]["customer_visible_delivery"]["operator_gate_required"] is True
+    assert payload["operator_acceptance_packet"]["feedback_ingestion"]["feedback_ingested"] is True
+    assert payload["operator_acceptance_packet"]["external_commitments"]["allowed"] is False
+    assert payload["operator_acceptance_packet"]["operator_signoff"]["required_signoffs"] == payload["operator_signoffs_required"]
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
 
@@ -1506,6 +1511,13 @@ def test_first_live_project_acceptance_check_keeps_first_run_local_only(tmp_path
         "external_commitments_disabled": True,
     }
     assert payload["blockers"] == []
+    assert payload["acceptance_contract"] == {
+        "customer_visible_delivery_bound": True,
+        "feedback_ingestion_bound": True,
+        "external_commitments_bound": True,
+        "operator_signoff_bound": True,
+        "fail_closed": True,
+    }
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
 
@@ -1855,6 +1867,7 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "status",
         "fixture_id",
         "checks",
+        "acceptance_contract",
         "blockers",
         "live_controls_enabled",
         "activation_effect",
@@ -1872,6 +1885,7 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "live_controls_disabled": True,
         "external_commitments_disabled": True,
     }
+    assert all(acceptance["acceptance_contract"].values())
 
     for packet in [run_packet, crosswalk, evidence_check, acceptance]:
         emitted = json.loads(Path(packet["artifact_path"]).read_text(encoding="utf-8"))
