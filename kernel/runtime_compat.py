@@ -77,6 +77,7 @@ from kernel.services import (
     pre_live_fail_closed_controls,
     runtime_evidence_manifest_item,
     stable_json_hash,
+    TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE,
     target_machine_evidence_check_packet,
     write_hashed_runtime_artifact,
     write_runtime_artifact,
@@ -2932,7 +2933,11 @@ def target_machine_validation_run_packet(
             "step": 7,
             "name": "first_live_project_packet",
             "command": _command_string(resolved, "--first-live-project-packet", str(root)),
-            "required_evidence": ["local_artifact_only", "operator_gate_before_external_delivery"],
+            "required_evidence": [
+                "local_artifact_only",
+                "operator_gate_before_external_delivery",
+                "first_live_project_events_before_projection_verified",
+            ],
             "fail_closed_on_missing_evidence": True,
         },
         {
@@ -2953,7 +2958,14 @@ def target_machine_validation_run_packet(
             "step": 10,
             "name": "preserve_target_machine_outputs",
             "command": "copy generated JSON outputs and run shasum -a 256 > SHA256SUMS",
-            "required_evidence": ["target_machine_artifact_bundle", "sha256sums", "pre_live_bundle_verification"],
+            "required_evidence": [
+                "target_machine_artifact_bundle",
+                "sha256sums",
+                "pre_live_bundle_verification",
+                "resume_replay_intents_reconstructed_only",
+                "external_side_effect_replay_disabled_verified",
+                "manifest_artifacts_hash_bound_before_live_authority",
+            ],
             "fail_closed_on_missing_evidence": True,
         },
     ]
@@ -3014,6 +3026,13 @@ def target_machine_validation_run_packet(
     }
     if not all(replay_projection_proof_contract.values()):
         blockers.append("replay_projection_proof_contract_incomplete")
+    declared_evidence = {
+        evidence_id
+        for step in run_steps
+        for evidence_id in step["required_evidence"]
+    }
+    if not set(TARGET_MACHINE_REPLAY_PROJECTION_EVIDENCE).issubset(declared_evidence):
+        blockers.append("replay_projection_required_evidence_incomplete")
     packet = {
         "available": True,
         "generated_at": timestamp,

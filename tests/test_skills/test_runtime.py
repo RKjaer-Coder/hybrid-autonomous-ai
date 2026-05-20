@@ -1706,6 +1706,9 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
         "run_packet_path",
         "sha256sums_path",
         "required_evidence",
+        "required_replay_projection_evidence",
+        "missing_replay_projection_evidence",
+        "ambiguous_replay_projection_evidence",
         "required_artifacts",
         "missing_required_evidence",
         "ambiguous_required_evidence",
@@ -1724,6 +1727,15 @@ def test_pre_live_runtime_artifact_packets_preserve_hashes_and_contract_shapes(t
     assert evidence_check["blockers"] == []
     assert evidence_check["closed_control_contract_ok"] is True
     assert all(evidence_check["replay_projection_contract"].values())
+    assert evidence_check["required_replay_projection_evidence"] == [
+        "projection_checks_verified",
+        "first_live_project_events_before_projection_verified",
+        "resume_replay_intents_reconstructed_only",
+        "external_side_effect_replay_disabled_verified",
+        "manifest_artifacts_hash_bound_before_live_authority",
+    ]
+    assert evidence_check["missing_replay_projection_evidence"] == []
+    assert evidence_check["ambiguous_replay_projection_evidence"] == []
     assert all(set(item) == {
         "name",
         "filename",
@@ -2058,6 +2070,8 @@ def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
     assert payload["blockers"] == []
     assert payload["missing_required_evidence"] == []
     assert payload["closed_control_contract_ok"] is True
+    assert payload["missing_replay_projection_evidence"] == []
+    assert payload["ambiguous_replay_projection_evidence"] == []
     assert payload["required_artifacts"] == [
         "first_live_project_packet",
         "hermes_adapter_gauntlet",
@@ -2070,6 +2084,56 @@ def test_target_machine_evidence_check_validates_preserved_bundle(tmp_path):
     assert all(item["matches_run_packet_manifest"] for item in payload["artifact_results"])
     assert payload["live_controls_enabled"] is False
     assert Path(payload["artifact_path"]).is_file()
+
+
+def test_target_machine_evidence_check_fails_closed_when_run_packet_proof_contract_drifts(tmp_path):
+    cfg = IntegrationConfig(
+        data_dir=str(tmp_path / "data"),
+        skills_dir=str(tmp_path / "skills"),
+        checkpoints_dir=str(tmp_path / "skills" / "checkpoints"),
+        alerts_dir=str(tmp_path / "alerts"),
+    )
+    run_packet = target_machine_validation_run_packet(
+        cfg,
+        repo_root=str(Path.cwd()),
+        as_of="2026-05-12T00:08:00+00:00",
+        candidate_limit=2,
+    )
+    bundle = tmp_path / "target-machine-bundle"
+    bundle.mkdir()
+    for item in run_packet["evidence_manifest"]:
+        source = Path(item["path"])
+        (bundle / source.name).write_bytes(source.read_bytes())
+    drifted_packet = dict(run_packet)
+    drifted_packet["replay_projection_proof_contract"] = dict(run_packet["replay_projection_proof_contract"])
+    drifted_packet["replay_projection_proof_contract"]["resume_replay_reconstructs_intents_only"] = False
+    run_packet_path = bundle / Path(run_packet["artifact_path"]).name
+    run_packet_path.write_text(json.dumps(drifted_packet, sort_keys=True), encoding="utf-8")
+    evidence_ids = {
+        evidence_id
+        for step in run_packet["run_steps"]
+        for evidence_id in step["required_evidence"]
+    }
+    evidence_records = {"evidence": {evidence_id: {"status": "present"} for evidence_id in sorted(evidence_ids)}}
+    (bundle / "evidence_records.json").write_text(json.dumps(evidence_records, sort_keys=True), encoding="utf-8")
+    sha_lines = []
+    for path in sorted(bundle.iterdir()):
+        if path.name == "SHA256SUMS":
+            continue
+        sha_lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+    (bundle / "SHA256SUMS").write_text("\n".join(sha_lines) + "\n", encoding="utf-8")
+
+    payload = target_machine_evidence_check(
+        cfg,
+        bundle_dir=str(bundle),
+        as_of="2026-05-12T00:09:00+00:00",
+    )
+
+    assert payload["status"] == "blocked"
+    assert "replay_projection_contract_not_proven" in payload["blockers"]
+    assert payload["replay_projection_contract"]["run_packet_proof_contract_declared"] is False
+    assert payload["replay_projection_contract"]["required_replay_projection_evidence_non_ambiguous"] is True
+    assert payload["live_controls_enabled"] is False
 
 
 def test_target_machine_evidence_check_fails_closed_on_missing_required_evidence(tmp_path):
