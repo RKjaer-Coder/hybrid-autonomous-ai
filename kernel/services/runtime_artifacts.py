@@ -278,6 +278,7 @@ def target_machine_evidence_check_packet(
     if packet and not closed_control_contract_ok:
         blockers.append("closed_control_contract_opened_live_control")
     proof_contract = packet.get("replay_projection_proof_contract", {})
+    proof_records = packet.get("replay_projection_proof_records", [])
     required_artifact_names = sorted(
         str(item.get("name") or Path(str(item.get("path", ""))).stem)
         for item in packet.get("evidence_manifest", [])
@@ -291,6 +292,9 @@ def target_machine_evidence_check_packet(
     replay_projection_contract = {
         "run_packet_proof_contract_declared": isinstance(proof_contract, dict)
         and all(proof_contract.get(key) is True for key in TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS),
+        "run_packet_proof_records_distinguish_replay_projection_effects": (
+            _replay_projection_proof_records_distinguish_effects(proof_records)
+        ),
         "required_replay_projection_evidence_declared": not missing_replay_projection_evidence,
         "required_replay_projection_evidence_non_ambiguous": (
             bool(required_replay_projection_evidence)
@@ -339,6 +343,32 @@ def target_machine_evidence_check_packet(
         "activation_effect": "none",
         "artifact_path": str(artifact_path),
     }
+
+
+def _replay_projection_proof_records_distinguish_effects(records: Any) -> bool:
+    if not isinstance(records, list) or not records:
+        return False
+    required_proof_keys = set(TARGET_MACHINE_REPLAY_PROJECTION_PROOF_KEYS)
+    seen_proof_keys: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            return False
+        proof_key = record.get("proof_contract_key")
+        if proof_key not in required_proof_keys:
+            return False
+        seen_proof_keys.add(str(proof_key))
+        if not record.get("evidence_id"):
+            return False
+        if not record.get("reconstructed_intent"):
+            return False
+        if not record.get("projected_state"):
+            return False
+        forbidden = record.get("forbidden_side_effect_reexecution")
+        if not isinstance(forbidden, dict) or forbidden.get("allowed") is not False:
+            return False
+        if not forbidden.get("control"):
+            return False
+    return required_proof_keys.issubset(seen_proof_keys)
 
 
 def _target_machine_evidence_record_binding_failures(
